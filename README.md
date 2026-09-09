@@ -19,7 +19,7 @@ Add to your `opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-ssh"]
+  "plugin": ["@judaharagao/opencode-ssh"]
 }
 ```
 
@@ -28,7 +28,7 @@ Or with configuration:
 ```json
 {
   "plugin": [
-    ["opencode-ssh", {
+    ["@judaharagao/opencode-ssh", {
       "mode": "full",
       "max_sessions": 5,
       "default_timeout": 30,
