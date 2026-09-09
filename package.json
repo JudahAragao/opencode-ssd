@@ -1,0 +1,64 @@
+{
+  "name": "opencode-ssh",
+  "version": "1.0.0",
+  "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "ssh",
+    "remote-access",
+    "security",
+    "command-blocking"
+  ],
+  "license": "MIT",
+  "author": "Judah Aragao",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JudahAragao/opencode-ssd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JudahAragao/opencode-ssd/issues"
+  },
+  "homepage": "https://github.com/JudahAragao/opencode-ssd",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "tsc && bun test",
+    "prepack": "tsc"
+  },
+  "dependencies": {
+    "ssh2": "^1.15.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/ssh2": "^1.11.0",
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "latest"
+  }
+}

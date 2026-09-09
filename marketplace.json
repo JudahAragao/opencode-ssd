@@ -1,0 +1,32 @@
+{
+  "name": "opencode-ssh",
+  "version": "1.0.0",
+  "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking and audit",
+  "author": "Judah Aragao",
+  "license": "MIT",
+  "repository": "https://github.com/JudahAragao/opencode-ssd",
+  "keywords": [
+    "ssh",
+    "remote-access",
+    "security",
+    "command-blocking",
+    "audit",
+    "shell"
+  ],
+  "features": [
+    "SSH session management (connect/disconnect/pool)",
+    "Secure command execution with real-time streaming",
+    "Destructive command blocking (100% blocked, no exceptions)",
+    "Risky command permission prompts (ask every time)",
+    "File upload/download via SCP/SFTP",
+    "Command safety checker (dry-run validation)",
+    "Full audit log with append-only persistence",
+    "Configurable security policies (strict/full/read-only modes)",
+    "Session aliasing and management",
+    "Input sanitization against injection attacks"
+  ],
+  "requirements": {
+    "opencode": ">=1.0.0",
+    "node": ">=18.0.0"
+  }
+}
