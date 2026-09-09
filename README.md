@@ -48,6 +48,27 @@ Or with configuration:
 | `audit_enabled` | boolean | `true` | Enable audit logging |
 | `blocklist_extra` | string[] | `[]` | Additional regex patterns to block |
 | `allowlist` | string[] | `[]` | Additional allowed patterns (restricted mode) |
+| `ssh_config_path` | string | `~/.ssh/config` | Path to the SSH config file used to resolve host aliases, defaults, and auto-connect targets |
+| `auto_connect` | boolean | `false` | Connect automatically at startup to every `Host` entry in the ssh config that has a `HostName` |
+
+## SSH Config Integration
+
+The plugin can reuse your existing `~/.ssh/config` (or a custom path via `ssh_config_path`):
+
+- **Host resolution** — `ssh.connect(host="myalias")` resolves the alias to its `HostName`, and automatically applies the `User`, `Port` and `IdentityFile` from the config. `username`, `port` and `auth_method`/`key_path` become optional when configured.
+- **Auto-connect** — with `"auto_connect": true`, the plugin connects at startup to every `Host` entry that has a `HostName`, using the configured key (or `~/.ssh/id_rsa`). Unreachable hosts are skipped without blocking startup.
+
+Example ssh config:
+
+```
+Host prod-web
+    HostName 10.0.0.10
+    User deploy
+    Port 2222
+    IdentityFile ~/.ssh/prod_key
+```
+
+With `ssh.connect(host="prod-web")` the plugin connects to `deploy@10.0.0.10:2222` using `~/.ssh/prod_key`.
 
 ## Security Modes
 

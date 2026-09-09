@@ -6,7 +6,8 @@ import { escapeShellArg } from "./sanitizer.js"
 export interface SshConnectionConfig {
   host: string
   port: number
-  username: string
+  /** SSH username, resolved from args or the ssh config. */
+  username?: string
   authMethod: "password" | "key"
   password?: string
   keyPath?: string
@@ -65,6 +66,10 @@ export class SshConnection {
    * Connect to the SSH server.
    */
   async connect(): Promise<void> {
+    if (!this._config.username) {
+      throw new Error("A username is required to connect (provide one or set User in the ssh config).")
+    }
+
     return new Promise((resolve, reject) => {
       const connectConfig: ConnectConfig = {
         host: this._config.host,

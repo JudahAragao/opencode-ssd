@@ -1,6 +1,6 @@
 {
   "name": "@judaharagao/opencode-ssh",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking",
   "type": "module",
   "main": "dist/index.js",

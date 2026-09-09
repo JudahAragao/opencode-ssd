@@ -6,6 +6,13 @@ import { getPolicy, addBlocklistPattern, removeBlocklistPattern, addAllowlistPat
 import { readAuditLog, formatAuditLog, getAuditStats } from "./ssh/audit.js"
 import { sanitizeHost, sanitizeUsername, sanitizePath } from "./ssh/sanitizer.js"
 import {
+  loadSshConfig,
+  findHostConfig,
+  getAutoConnectHosts,
+  expandHomePath,
+  type SshConfigEntry,
+} from "./ssh/config.js"
+import {
   formatExecResult,
   formatSessionList,
   formatConnectResult,
@@ -16,14 +23,80 @@ import {
 import type { SecurityMode } from "./config/schema.js"
 import type { SshConnectionConfig } from "./ssh/connection.js"
 
-// ── Shared session manager (one per plugin instance) ──
-let sessionManager: SshSessionManager | null = null
+interface ConnectInput {
+  host: string
+  port?: number
+  username?: string
+  auth_method?: "password" | "key"
+  password?: string
+  key_path?: string
+  passphrase?: string
+  alias?: string
+}
 
-function getManager(maxSessions: number = 5): SshSessionManager {
-  if (!sessionManager) {
-    sessionManager = new SshSessionManager({ maxSessions })
+/**
+ * Build an ssh.connect connection config, applying defaults from the
+ * ~/.ssh/config file (alias → HostName, User, Port, IdentityFile).
+ */
+function resolveHostConfig(
+  args: ConnectInput,
+  sshConfigPath?: string,
+): { config: SshConnectionConfig; displayHost: string; resolvedFrom?: string } {
+  const loaded = loadSshConfig(sshConfigPath)
+  const entry: SshConfigEntry | undefined = loaded.entries.length
+    ? findHostConfig(loaded.entries, args.host)
+    : undefined
+
+  const displayHost = args.host
+  const realHost = entry?.hostName && entry.hostName !== args.host ? entry.hostName : args.host
+  const port = args.port || entry?.port || 22
+  const username = args.username || entry?.user
+  const authMethod = args.auth_method || (entry?.identityFile ? "key" : "password")
+  const keyPath = args.key_path || (entry?.identityFile ? expandHomePath(entry.identityFile) : undefined)
+  const alias = args.alias || (realHost !== args.host ? args.host : undefined)
+
+  return {
+    config: {
+      host: realHost,
+      port,
+      username,
+      authMethod,
+      password: args.password,
+      keyPath,
+      passphrase: args.passphrase,
+      alias,
+      timeout: 10000,
+    },
+    displayHost,
+    resolvedFrom: entry ? loaded.path : undefined,
   }
-  return sessionManager
+}
+
+/**
+ * Auto-connect to every ssh config host that resolves to a real HostName.
+ * Best-effort: individual failures are swallowed, and the plugin keeps
+ * loading even if no host is reachable.
+ */
+async function startAutoConnect(
+  manager: SshSessionManager,
+  sshConfigPath?: string,
+): Promise<void> {
+  const hosts = getAutoConnectHosts(sshConfigPath)
+  for (const host of hosts) {
+    try {
+      await manager.createSession({
+        host: host.hostName,
+        port: host.port || 22,
+        username: host.user || process.env.USER || process.env.USERNAME || "root",
+        authMethod: "key",
+        keyPath: host.identityFile ? expandHomePath(host.identityFile) : undefined,
+        alias: host.alias,
+        timeout: 10000,
+      })
+    } catch {
+      // Ignore unreachable hosts on auto-connect
+    }
+  }
 }
 
 /**
@@ -34,7 +107,17 @@ export function createSshTools(
   maxSessions: number = 5,
   defaultTimeout: number = 30,
   extraBlocklist: string[] = [],
+  sshConfigPath?: string,
+  autoConnect: boolean = false,
 ): Record<string, ToolDefinition> {
+  const sessionManager = new SshSessionManager({ maxSessions })
+
+  if (autoConnect) {
+    // Best-effort auto-connect to hosts defined in the ssh config.
+    // Non-blocking: failures for individual hosts are swallowed and
+    // do not prevent the plugin from loading.
+    void startAutoConnect(sessionManager, sshConfigPath)
+  }
   return {
     // ═══════════════════════════════════════════════════════════════
     // ssh.connect — Establish SSH connection
@@ -42,72 +125,80 @@ export function createSshTools(
     "ssh.connect": tool({
       description:
         "Establish an SSH connection to a remote server. Returns a session_id for use with other ssh.* tools. " +
-        "Supports password and key-based authentication. Credentials are never stored in logs or output.",
+        "Supports password and key-based authentication. Credentials are never stored in logs or output. " +
+        "If ssh_config_path is set, host aliases from the ssh config are resolved and their " +
+        "User/Port/IdentityFile defaults are applied automatically.",
       args: {
-        host: tool.schema.string().describe("Remote server hostname or IP address"),
-        port: tool.schema.number().optional().describe("SSH port (default: 22)"),
-        username: tool.schema.string().describe("SSH username"),
-        auth_method: tool.schema.enum(["password", "key"]).describe("Authentication method"),
+        host: tool.schema.string().describe("Remote server hostname, IP, or ssh config alias"),
+        port: tool.schema.number().optional().describe("SSH port (default: 22, or port from ssh config)"),
+        username: tool.schema.string().optional().describe("SSH username (default: from ssh config)"),
+        auth_method: tool.schema.enum(["password", "key"]).optional().describe("Authentication method (default: key if an identity file is configured, else password)"),
         password: tool.schema.string().optional().describe("Password (only for password auth)"),
-        key_path: tool.schema.string().optional().describe("Path to private key file (default: ~/.ssh/id_rsa)"),
+        key_path: tool.schema.string().optional().describe("Path to private key file (default: identity file from ssh config, else ~/.ssh/id_rsa)"),
         passphrase: tool.schema.string().optional().describe("Passphrase for the private key"),
         alias: tool.schema.string().optional().describe("Friendly name for this session"),
       },
       async execute(args, ctx) {
+        // ── Resolve defaults from the ssh config (alias, user, port, identity) ──
+        const { config: resolvedConfig, displayHost, resolvedFrom } = resolveHostConfig(args, sshConfigPath)
+
         // ── Input validation ──
-        const hostCheck = sanitizeHost(args.host)
+        const hostCheck = sanitizeHost(displayHost)
         if (!hostCheck.clean) {
           return `❌ Invalid host: ${hostCheck.reason}`
         }
 
-        const userCheck = sanitizeUsername(args.username)
-        if (!userCheck.clean) {
-          return `❌ Invalid username: ${userCheck.reason}`
+        if (resolvedConfig.username) {
+          const userCheck = sanitizeUsername(resolvedConfig.username)
+          if (!userCheck.clean) {
+            return `❌ Invalid username: ${userCheck.reason}`
+          }
+        } else {
+          return "❌ A username is required. Provide one or add a User directive in your ssh config."
         }
+
+        const displayPort = args.port || resolvedConfig.port || 22
 
         // ── Ask for permission ──
         await ctx.ask({
           permission: "ssh.connect",
-          patterns: [`${args.username}@${args.host}:${args.port || 22}`],
-          always: [`${args.username}@${args.host}:${args.port || 22}`],
+          patterns: [`${resolvedConfig.username}@${displayHost}:${displayPort}`],
+          always: [`${resolvedConfig.username}@${displayHost}:${displayPort}`],
           metadata: {
-            host: args.host,
-            port: args.port || 22,
-            username: args.username,
-            auth_method: args.auth_method,
+            host: displayHost,
+            resolved_host: resolvedConfig.host !== displayHost ? resolvedConfig.host : undefined,
+            port: displayPort,
+            username: resolvedConfig.username,
+            auth_method: resolvedConfig.authMethod,
             alias: args.alias,
+            ssh_config: resolvedFrom || undefined,
           },
         })
 
         // ── Connect ──
-        const manager = getManager(maxSessions)
-        const config: SshConnectionConfig = {
-          host: args.host,
-          port: args.port || 22,
-          username: args.username,
-          authMethod: args.auth_method,
-          password: args.password,
-          keyPath: args.key_path,
-          passphrase: args.passphrase,
-          alias: args.alias,
-          timeout: 10000,
-        }
+        const manager = sessionManager
 
         try {
-          const sessionId = await manager.createSession(config)
-          return formatConnectResult(
-            sessionId,
-            args.host,
-            args.port || 22,
-            args.username,
-            args.alias,
-          )
+          const sessionId = await manager.createSession(resolvedConfig)
+          const lines = [
+            formatConnectResult(
+              sessionId,
+              displayHost,
+              displayPort,
+              resolvedConfig.username!,
+              args.alias,
+            ),
+          ]
+          if (resolvedConfig.host !== displayHost) {
+            lines.push(`> Resolved via ssh config: ${displayHost} → ${resolvedConfig.host}`)
+          }
+          return lines.join("\n")
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
           return [
             `## ❌ SSH Connection Failed`,
             "",
-            `**Host:** ${args.username}@${args.host}:${args.port || 22}`,
+            `**Host:** ${resolvedConfig.username}@${displayHost}:${displayPort}`,
             `**Error:** ${msg}`,
             "",
             "Troubleshooting:",
@@ -136,7 +227,7 @@ export function createSshTools(
           metadata: { session_id: args.session_id },
         })
 
-        const manager = getManager(maxSessions)
+        const manager = sessionManager
         const closed = await manager.closeSession(args.session_id)
 
         if (!closed) {
@@ -154,7 +245,7 @@ export function createSshTools(
       description: "List all active SSH sessions with their status, host, and uptime.",
       args: {},
       async execute(_args, _ctx) {
-        const manager = getManager(maxSessions)
+        const manager = sessionManager
         const sessions = manager.listSessions()
         return formatSessionList(sessions)
       },
@@ -178,7 +269,7 @@ export function createSshTools(
       },
       async execute(args, ctx) {
         // ── Validate session ──
-        const manager = getManager(maxSessions)
+        const manager = sessionManager
         const connection = manager.getSession(args.session_id)
         if (!connection) {
           return `❌ Session \`${args.session_id}\` not found. Use ssh.list_sessions to see active sessions.`
@@ -283,7 +374,7 @@ export function createSshTools(
         timeout: tool.schema.number().optional().describe("Timeout per command in seconds"),
       },
       async execute(args, ctx) {
-        const manager = getManager(maxSessions)
+        const manager = sessionManager
         const connection = manager.getSession(args.session_id)
         if (!connection) {
           return `❌ Session \`${args.session_id}\` not found.`
@@ -399,7 +490,7 @@ export function createSshTools(
         remote_path: tool.schema.string().describe("Remote destination path"),
       },
       async execute(args, ctx) {
-        const manager = getManager(maxSessions)
+        const manager = sessionManager
         const connection = manager.getSession(args.session_id)
         if (!connection) {
           return `❌ Session \`${args.session_id}\` not found.`
@@ -458,7 +549,7 @@ export function createSshTools(
         local_path: tool.schema.string().describe("Local destination path"),
       },
       async execute(args, ctx) {
-        const manager = getManager(maxSessions)
+        const manager = sessionManager
         const connection = manager.getSession(args.session_id)
         if (!connection) {
           return `❌ Session \`${args.session_id}\` not found.`

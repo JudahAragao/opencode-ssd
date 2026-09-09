@@ -14,6 +14,8 @@ const SshPlugin: Plugin = async (_ctx, options) => {
     config.max_sessions,
     config.default_timeout,
     config.blocklist_extra,
+    config.ssh_config_path,
+    config.auto_connect,
   )
   const hooks = createSshHooks(config.mode, config.blocklist_extra)
 
