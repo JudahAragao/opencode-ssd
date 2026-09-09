@@ -62,6 +62,7 @@ describe("SshConnection", () => {
       port: 22,
       username: "admin",
       authMethod: "key",
+      autoReconnect: false,
     }
 
     const conn = new SshConnection("test-004", config)
@@ -74,9 +75,26 @@ describe("SshConnection", () => {
       port: 22,
       username: "admin",
       authMethod: "key",
+      autoReconnect: false,
     }
 
     const conn = new SshConnection("test-005", config)
     await expect(conn.sftp()).rejects.toThrow("not active")
+  })
+
+  test("password is cleared from config after a failed reconnect attempt", async () => {
+    const config: SshConnectionConfig = {
+      host: "127.0.0.1",
+      port: 1, // nothing listens here → connection refused quickly
+      username: "nobody",
+      authMethod: "password",
+      password: "hunter2",
+      timeout: 2000,
+    }
+
+    const conn = new SshConnection("test-006", config)
+    await expect(conn.connect()).rejects.toThrow()
+    // Password is still present (cleared only after a SUCCESSFUL handshake).
+    expect((conn.config as any).password).toBe("hunter2")
   })
 })

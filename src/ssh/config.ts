@@ -17,11 +17,17 @@ export interface SshConfigEntry {
   port?: number
   /** Identity file (IdentityFile). */
   identityFile?: string
+  /** ProxyJump: comma-separated list of user@host:port hops. */
+  proxyJump?: string
+  /** ProxyCommand: external command to open the tunnel. */
+  proxyCommand?: string
 }
 
 export interface LoadedSshConfig {
   entries: SshConfigEntry[]
   path: string
+  /** Whether the configured ssh config file exists on disk. */
+  exists: boolean
 }
 
 /** Expand a leading `~` to the current user's home directory. */
@@ -94,6 +100,12 @@ export function parseSshConfig(content: string): SshConfigEntry[] {
       case "identityfile":
         current.identityFile = value
         break
+      case "proxyjump":
+        current.proxyJump = value
+        break
+      case "proxycommand":
+        current.proxyCommand = value
+        break
     }
   }
 
@@ -135,8 +147,44 @@ export function findHostConfig(entries: SshConfigEntry[], host: string): SshConf
 /** Load and parse the ssh config file. Empty entry list if it does not exist. */
 export function loadSshConfig(configuredPath?: string): LoadedSshConfig {
   const path = resolveSshConfigPath(configuredPath)
-  if (!existsSync(path)) return { entries: [], path }
-  return { entries: parseSshConfig(readFileSync(path, "utf-8")), path }
+  if (!existsSync(path)) return { entries: [], path, exists: false }
+  return { entries: parseSshConfig(readFileSync(path, "utf-8")), path, exists: true }
+}
+
+/**
+ * Parse a ProxyJump value ("user@host:port,user2@host2").
+ */
+export function parseProxyJump(
+  value: string,
+  defaultUser?: string,
+  defaultKeyPath?: string,
+): Array<{ host: string; port: number; username?: string; keyPath?: string }> {
+  return value
+    .split(",")
+    .map((hop) => hop.trim())
+    .filter(Boolean)
+    .map((hop) => {
+      let user: string | undefined
+      let rest = hop
+      if (hop.includes("@")) {
+        const at = hop.lastIndexOf("@")
+        user = hop.slice(0, at)
+        rest = hop.slice(at + 1)
+      }
+      let port = 22
+      let host = rest
+      const colon = rest.match(/^(.*):(\d+)$/)
+      if (colon) {
+        host = colon[1]
+        port = Number(colon[2])
+      }
+      return {
+        host,
+        port,
+        username: user || defaultUser,
+        keyPath: defaultKeyPath,
+      }
+    })
 }
 
 /**

@@ -2,6 +2,8 @@ import { Client, type ConnectConfig } from "ssh2"
 import { readFileSync, existsSync } from "fs"
 import { resolve as pathResolve } from "path"
 import { escapeShellArg } from "./sanitizer.js"
+import { verifyHostKey } from "./known_hosts.js"
+import { prepareProxy, type ProxySpec } from "./proxy.js"
 
 export interface SshConnectionConfig {
   host: string
@@ -16,6 +18,16 @@ export interface SshConnectionConfig {
   timeout?: number
   /** Connection alias for display */
   alias?: string
+  /** Reject hosts whose key is not (an identical match) in known_hosts. */
+  strictHostKey?: boolean
+  /** Custom path to a known_hosts file. */
+  knownHostsPath?: string
+  /** SSH config default path, used to locate known_hosts next to it. */
+  sshConfigPath?: string
+  /** ProxyJump / ProxyCommand support. */
+  proxy?: ProxySpec
+  /** Automatically reconnect a dropped session on the next exec/sftp. */
+  autoReconnect?: boolean
 }
 
 export interface SshConnectionInfo {
@@ -26,20 +38,25 @@ export interface SshConnectionInfo {
   lastActivity?: string
 }
 
+const DEFAULT_KNOWN_HOSTS = () => pathResolve(process.env.HOME || "", ".ssh", "known_hosts")
+
 export class SshConnection {
-  private client: Client
+  private client!: Client
   private _config: SshConnectionConfig
   private _id: string
   private _connected = false
   private _connectedAt?: Date
   private _lastActivity?: Date
-  private _reconnectAttempts = 0
-  private _maxReconnectAttempts = 3
+  private _maxAttempts = 3
+  private _attempts = 0
+  private _proxyCleanup?: () => void
+  private _hostKeyVerdict?: "ok" | "changed" | "unknown"
 
   constructor(id: string, config: SshConnectionConfig) {
     this._id = id
     this._config = config
-    this.client = new Client()
+    this._config.strictHostKey = this._config.strictHostKey ?? false
+    this._config.autoReconnect = this._config.autoReconnect ?? true
   }
 
   get id(): string {
@@ -62,86 +79,139 @@ export class SshConnection {
     return this._lastActivity
   }
 
+  /** Result of the last known_hosts check (undefined when disabled). */
+  get hostKeyVerdict(): "ok" | "changed" | "unknown" | undefined {
+    return this._hostKeyVerdict
+  }
+
   /**
-   * Connect to the SSH server.
+   * Connect to the SSH server, with bounded retries.
    */
   async connect(): Promise<void> {
     if (!this._config.username) {
       throw new Error("A username is required to connect (provide one or set User in the ssh config).")
     }
 
-    return new Promise((resolve, reject) => {
-      const connectConfig: ConnectConfig = {
+    this._attempts = 0
+    await this.connectWithBackoff()
+
+    // Credentials are only needed for the handshake; drop them from memory
+    // once the connection is established so they are not retained.
+    this._config.password = undefined
+  }
+
+  private async connectWithBackoff(): Promise<void> {
+    try {
+      const cfg = await this.buildConnectConfig()
+      await this.openConnection(cfg)
+    } catch (err) {
+      this._attempts++
+      if (this._attempts < this._maxAttempts) {
+        await new Promise((r) => setTimeout(r, 1000 * this._attempts))
+        return this.connectWithBackoff()
+      }
+      throw err
+    }
+  }
+
+  private async buildConnectConfig(): Promise<ConnectConfig> {
+    const connectConfig: ConnectConfig = {
+      host: this._config.host,
+      port: this._config.port,
+      username: this._config.username,
+      readyTimeout: this._config.timeout || 10000,
+      keepaliveInterval: 10000,
+      keepaliveCountMax: 3,
+    }
+
+    // ── Host key verification (MITM protection) ──
+    if (this._config.strictHostKey) {
+      const knownHostsPath = this._config.knownHostsPath || DEFAULT_KNOWN_HOSTS()
+      connectConfig.hostVerifier = (key: Buffer): boolean => {
+        const verdict = verifyHostKey(this._config.host, key, knownHostsPath, this._config.port)
+        this._hostKeyVerdict = verdict
+        // A changed key is always rejected. An unknown key is only accepted
+        // in non-strict mode; here strict mode requires it to be present.
+        return verdict === "ok"
+      }
+    }
+
+    // ── Proxy tunnel (ProxyJump / ProxyCommand) ──
+    if (this._config.proxy) {
+      const prepared = await prepareProxy(this._config.proxy, {
         host: this._config.host,
         port: this._config.port,
         username: this._config.username,
-        readyTimeout: this._config.timeout || 10000,
-        keepaliveInterval: 10000,
-        keepaliveCountMax: 3,
-      }
+        keyPath: this._config.keyPath,
+        passphrase: this._config.passphrase,
+      })
+      this._proxyCleanup = prepared.cleanup
+      connectConfig.sock = prepared.sock
+    }
 
-      // Configure authentication
-      if (this._config.authMethod === "password") {
+    // ── Authentication ──
+    if (this._config.authMethod === "password") {
+      if (this._config.password) {
         connectConfig.password = this._config.password
-      } else {
-        // Key-based authentication
-        const keyPath = this._config.keyPath
-          ? pathResolve(this._config.keyPath.replace("~", process.env.HOME || ""))
-          : pathResolve(process.env.HOME || "", ".ssh", "id_rsa")
+      }
+    } else {
+      const keyPath = this._config.keyPath
+        ? pathResolve(this._config.keyPath.replace("~", process.env.HOME || ""))
+        : pathResolve(process.env.HOME || "", ".ssh", "id_rsa")
 
-        if (!existsSync(keyPath)) {
-          reject(new Error(`SSH key not found: ${keyPath}`))
-          return
-        }
-
-        connectConfig.privateKey = readFileSync(keyPath, "utf-8")
-        if (this._config.passphrase) {
-          connectConfig.passphrase = this._config.passphrase
-        }
+      if (!existsSync(keyPath)) {
+        throw new Error(`SSH key not found: ${keyPath}`)
       }
 
-      this.client.on("ready", () => {
+      connectConfig.privateKey = readFileSync(keyPath, "utf-8")
+      if (this._config.passphrase) {
+        connectConfig.passphrase = this._config.passphrase
+      }
+    }
+
+    return connectConfig
+  }
+
+  private async openConnection(cfg: ConnectConfig): Promise<void> {
+    // A fresh Client per attempt so a failed handshake never leaves the
+    // previous transport in an unusable state.
+    const client = new Client()
+    this.client = client
+
+    return new Promise((resolve, reject) => {
+      client.on("ready", () => {
         this._connected = true
         this._connectedAt = new Date()
         this._lastActivity = new Date()
-        this._reconnectAttempts = 0
         resolve()
       })
-
-      this.client.on("error", (err: Error) => {
+      client.on("error", (err: Error) => {
         this._connected = false
-        if (this._reconnectAttempts < this._maxReconnectAttempts) {
-          this._reconnectAttempts++
-          // Attempt reconnect after delay
-          setTimeout(() => {
-            this.connect().catch(() => {})
-          }, 1000 * this._reconnectAttempts)
-        }
         reject(err)
       })
-
-      this.client.on("close", () => {
+      client.on("close", () => {
         this._connected = false
       })
-
-      this.client.on("end", () => {
+      client.on("end", () => {
         this._connected = false
       })
-
-      this.client.connect(connectConfig)
+      client.connect(cfg)
     })
   }
 
   /**
-   * Execute a command on the remote server.
-   * Returns a stream for real-time output.
+   * Execute a command on the remote server. Automatically reconnects a
+   * dropped session before running.
    */
   async exec(
     command: string,
     options?: { cwd?: string; timeout?: number },
   ): Promise<{ stdout: string; stderr: string; code: number | null; signal: string | undefined }> {
     if (!this._connected) {
-      throw new Error("SSH connection is not active")
+      if (this._config.autoReconnect === false) {
+        throw new Error("SSH connection is not active")
+      }
+      await this.connect()
     }
 
     this._lastActivity = new Date()
@@ -164,7 +234,6 @@ export class SshConnection {
         let stderr = ""
         let killed = false
 
-        // Set timeout
         if (timeoutMs > 0) {
           timeoutId = setTimeout(() => {
             killed = true
@@ -224,12 +293,18 @@ export class SshConnection {
   }
 
   /**
-   * Get an SFTP session for file transfers.
+   * Get an SFTP session for file transfers. Automatically reconnects a
+   * dropped session before returning.
    */
   async sftp(): Promise<any> {
     if (!this._connected) {
-      throw new Error("SSH connection is not active")
+      if (this._config.autoReconnect === false) {
+        throw new Error("SSH connection is not active")
+      }
+      await this.connect()
     }
+
+    this._lastActivity = new Date()
 
     return new Promise((resolve, reject) => {
       this.client.sftp((err, sftp) => {
@@ -246,10 +321,12 @@ export class SshConnection {
    * Disconnect from the SSH server.
    */
   disconnect(): void {
-    if (this._connected) {
+    if (this.client) {
       this.client.end()
-      this._connected = false
     }
+    this._connected = false
+    this._proxyCleanup?.()
+    this._proxyCleanup = undefined
   }
 
   /**

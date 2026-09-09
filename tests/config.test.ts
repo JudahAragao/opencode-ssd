@@ -35,6 +35,11 @@ Match host example
 Host github.com
     User git
     IdentityFile ~/.ssh/id_ed25519
+    ProxyJump jumpuser@jump-host:2200
+
+Host prod-db
+    HostName 10.0.0.50
+    ProxyCommand ssh -W %h:%p bastion
 `
 
 describe("SSH Config parser", () => {
@@ -75,6 +80,18 @@ describe("SSH Config parser", () => {
   test("returns undefined when no host matches", () => {
     const entries = parseSshConfig(SAMPLE_CONFIG)
     expect(findHostConfig(entries, "unknown-host")).toBeUndefined()
+  })
+
+  test("parses ProxyJump directive", () => {
+    const entries = parseSshConfig(SAMPLE_CONFIG)
+    const github = findHostConfig(entries, "github.com")
+    expect(github?.proxyJump).toBe("jumpuser@jump-host:2200")
+  })
+
+  test("parses ProxyCommand directive", () => {
+    const entries = parseSshConfig(SAMPLE_CONFIG)
+    const db = findHostConfig(entries, "prod-db")
+    expect(db?.proxyCommand).toBe("ssh -W %h:%p bastion")
   })
 
   test("resolves default ssh config path", () => {

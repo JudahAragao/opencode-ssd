@@ -37,6 +37,18 @@ export const SshPluginConfig = z
 
     /** Auto-connect on plugin boot (requires saved session) */
     auto_connect: z.boolean().default(false),
+
+    /** Reconnect a dropped session automatically on the next command */
+    auto_reconnect: z.boolean().default(true),
+
+    /** Reject hosts whose key is not in known_hosts (MITM protection) */
+    strict_host_key: z.boolean().default(false),
+
+    /** Max commands allowed per host per minute (rate limiting) */
+    rate_limit_per_minute: z.number().int().min(1).max(10000).default(120),
+
+    /** Minimum delay in seconds between commands on the same host (cooldown) */
+    cooldown_seconds: z.number().int().min(0).max(3600).default(0),
   })
   .strict()
 
@@ -50,4 +62,8 @@ export const DEFAULT_CONFIG: SshPluginConfigType = {
   blocklist_extra: [],
   allowlist: [],
   auto_connect: false,
+  auto_reconnect: true,
+  strict_host_key: false,
+  rate_limit_per_minute: 120,
+  cooldown_seconds: 0,
 }

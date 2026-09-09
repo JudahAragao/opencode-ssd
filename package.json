@@ -1,6 +1,6 @@
 {
   "name": "@judaharagao/opencode-ssh",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking",
   "type": "module",
   "main": "dist/index.js",
@@ -59,6 +59,6 @@
     "typescript": "^5.5.0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "latest"
+    "@opencode-ai/plugin": "^1.18.0"
   }
 }

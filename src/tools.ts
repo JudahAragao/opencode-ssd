@@ -10,8 +10,10 @@ import {
   findHostConfig,
   getAutoConnectHosts,
   expandHomePath,
+  parseProxyJump,
   type SshConfigEntry,
 } from "./ssh/config.js"
+import { RateLimiter } from "./ssh/ratelimit.js"
 import {
   formatExecResult,
   formatSessionList,
@@ -36,13 +38,14 @@ interface ConnectInput {
 
 /**
  * Build an ssh.connect connection config, applying defaults from the
- * ~/.ssh/config file (alias → HostName, User, Port, IdentityFile).
+ * ~/.ssh/config file (alias → HostName, User, Port, IdentityFile,
+ * ProxyJump, ProxyCommand).
  */
 function resolveHostConfig(
   args: ConnectInput,
-  sshConfigPath?: string,
-): { config: SshConnectionConfig; displayHost: string; resolvedFrom?: string } {
-  const loaded = loadSshConfig(sshConfigPath)
+  opts: { sshConfigPath?: string; strictHostKey?: boolean; knownHostsPath?: string; autoReconnect?: boolean } = {},
+): { config: SshConnectionConfig; displayHost: string; resolvedFrom?: string; sshConfigExists: boolean } {
+  const loaded = loadSshConfig(opts.sshConfigPath)
   const entry: SshConfigEntry | undefined = loaded.entries.length
     ? findHostConfig(loaded.entries, args.host)
     : undefined
@@ -55,6 +58,16 @@ function resolveHostConfig(
   const keyPath = args.key_path || (entry?.identityFile ? expandHomePath(entry.identityFile) : undefined)
   const alias = args.alias || (realHost !== args.host ? args.host : undefined)
 
+  // ProxyJump / ProxyCommand from the ssh config
+  let proxy: SshConnectionConfig["proxy"]
+  if (entry?.proxyCommand) {
+    proxy = { command: entry.proxyCommand }
+  } else if (entry?.proxyJump) {
+    proxy = {
+      jumps: parseProxyJump(entry.proxyJump, username, keyPath),
+    }
+  }
+
   return {
     config: {
       host: realHost,
@@ -66,35 +79,53 @@ function resolveHostConfig(
       passphrase: args.passphrase,
       alias,
       timeout: 10000,
+      strictHostKey: opts.strictHostKey,
+      knownHostsPath: opts.knownHostsPath,
+      sshConfigPath: opts.sshConfigPath,
+      proxy,
+      autoReconnect: opts.autoReconnect ?? true,
     },
     displayHost,
     resolvedFrom: entry ? loaded.path : undefined,
+    sshConfigExists: loaded.exists,
   }
+}
+
+/** Wait helper for auto-connect retries. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
 }
 
 /**
  * Auto-connect to every ssh config host that resolves to a real HostName.
- * Best-effort: individual failures are swallowed, and the plugin keeps
- * loading even if no host is reachable.
+ * Best-effort with retry/backoff: each host is attempted up to MAX_ATTEMPTS
+ * times with increasing delays, and individual failures are swallowed so
+ * the plugin always loads.
  */
 async function startAutoConnect(
   manager: SshSessionManager,
   sshConfigPath?: string,
 ): Promise<void> {
+  const MAX_ATTEMPTS = 3
   const hosts = getAutoConnectHosts(sshConfigPath)
   for (const host of hosts) {
-    try {
-      await manager.createSession({
-        host: host.hostName,
-        port: host.port || 22,
-        username: host.user || process.env.USER || process.env.USERNAME || "root",
-        authMethod: "key",
-        keyPath: host.identityFile ? expandHomePath(host.identityFile) : undefined,
-        alias: host.alias,
-        timeout: 10000,
-      })
-    } catch {
-      // Ignore unreachable hosts on auto-connect
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        await manager.createSession({
+          host: host.hostName,
+          port: host.port || 22,
+          username: host.user || process.env.USER || process.env.USERNAME || "root",
+          authMethod: host.identityFile ? "key" : "password",
+          keyPath: host.identityFile ? expandHomePath(host.identityFile) : undefined,
+          alias: host.alias,
+          timeout: 10000,
+        })
+        break // connected
+      } catch {
+        if (attempt < MAX_ATTEMPTS) {
+          await sleep(1000 * attempt) // backoff: 1s, 2s
+        }
+      }
     }
   }
 }
@@ -109,13 +140,24 @@ export function createSshTools(
   extraBlocklist: string[] = [],
   sshConfigPath?: string,
   autoConnect: boolean = false,
+  opts: { strictHostKey?: boolean; knownHostsPath?: string; rateLimitPerMinute?: number; cooldownSeconds?: number; autoReconnect?: boolean } = {},
 ): Record<string, ToolDefinition> {
   const sessionManager = new SshSessionManager({ maxSessions })
+  const rateLimiter = new RateLimiter({
+    maxPerMinute: opts.rateLimitPerMinute ?? 120,
+    cooldownSeconds: opts.cooldownSeconds ?? 0,
+  })
+  const sshOpts = {
+    sshConfigPath,
+    strictHostKey: opts.strictHostKey ?? false,
+    knownHostsPath: opts.knownHostsPath,
+    autoReconnect: opts.autoReconnect ?? true,
+  }
 
   if (autoConnect) {
-    // Best-effort auto-connect to hosts defined in the ssh config.
-    // Non-blocking: failures for individual hosts are swallowed and
-    // do not prevent the plugin from loading.
+    // Best-effort auto-connect to hosts defined in the ssh config with
+    // retry/backoff. Non-blocking: failures are swallowed and do not
+    // prevent the plugin from loading.
     void startAutoConnect(sessionManager, sshConfigPath)
   }
   return {
@@ -139,8 +181,8 @@ export function createSshTools(
         alias: tool.schema.string().optional().describe("Friendly name for this session"),
       },
       async execute(args, ctx) {
-        // ── Resolve defaults from the ssh config (alias, user, port, identity) ──
-        const { config: resolvedConfig, displayHost, resolvedFrom } = resolveHostConfig(args, sshConfigPath)
+        // ── Resolve defaults from the ssh config (alias, user, port, identity, proxy) ──
+        const { config: resolvedConfig, displayHost, resolvedFrom, sshConfigExists } = resolveHostConfig(args, sshOpts)
 
         // ── Input validation ──
         const hostCheck = sanitizeHost(displayHost)
@@ -191,6 +233,12 @@ export function createSshTools(
           ]
           if (resolvedConfig.host !== displayHost) {
             lines.push(`> Resolved via ssh config: ${displayHost} → ${resolvedConfig.host}`)
+          }
+          if (sshConfigPath && !sshConfigExists) {
+            lines.push(`> ⚠️ Configured ssh config file not found: \`${sshConfigPath}\` — defaults were not applied.`)
+          }
+          if (resolvedConfig.proxy) {
+            lines.push(`> 🛤️ Connecting through proxy (${resolvedConfig.proxy.jumps?.length ?? 0} hop(s))`)
           }
           return lines.join("\n")
         } catch (error) {
@@ -275,8 +323,19 @@ export function createSshTools(
           return `❌ Session \`${args.session_id}\` not found. Use ssh.list_sessions to see active sessions.`
         }
 
-        if (!connection.connected) {
-          return `❌ Session \`${args.session_id}\` is disconnected. Reconnect with ssh.connect.`
+        // ── Rate limit per host ──
+        const hostKey = connection.config.alias || connection.config.host
+        const rateCheck = rateLimiter.check(hostKey)
+        if (!rateCheck.allowed) {
+          return [
+            `## ⏳ Command Rate Limited`,
+            "",
+            `**Host:** \`${hostKey}\``,
+            `**Reason:** ${rateCheck.reason}`,
+            rateCheck.retryAfterSeconds ? `**Retry after:** ~${rateCheck.retryAfterSeconds}s` : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
         }
 
         // ── Validate command against blocklist BEFORE asking for permission ──
@@ -340,19 +399,24 @@ export function createSshTools(
         }
 
         // ── Execute ──
-        const result = await executeCommand(
-          connection,
-          args.command,
-          mode,
-          extraBlocklist,
-          args.session_id,
-          {
-            cwd: args.cwd,
-            timeout: args.timeout || defaultTimeout,
-            sudo: args.sudo,
-          },
-          ctx.directory,
-        )
+        let result: ExecResult
+        try {
+          result = await executeCommand(
+            connection,
+            args.command,
+            mode,
+            extraBlocklist,
+            args.session_id,
+            {
+              cwd: args.cwd,
+              timeout: args.timeout || defaultTimeout,
+              sudo: args.sudo,
+            },
+            ctx.directory,
+          )
+        } finally {
+          rateLimiter.record(hostKey, true)
+        }
 
         return formatExecResult(result)
       },
@@ -378,6 +442,21 @@ export function createSshTools(
         const connection = manager.getSession(args.session_id)
         if (!connection) {
           return `❌ Session \`${args.session_id}\` not found.`
+        }
+
+        // ── Rate limit per host ──
+        const batchHostKey = connection.config.alias || connection.config.host
+        const batchRateCheck = rateLimiter.check(batchHostKey)
+        if (!batchRateCheck.allowed) {
+          return [
+            `## ⏳ Batch Rate Limited`,
+            "",
+            `**Host:** \`${batchHostKey}\``,
+            `**Reason:** ${batchRateCheck.reason}`,
+            batchRateCheck.retryAfterSeconds ? `**Retry after:** ~${batchRateCheck.retryAfterSeconds}s` : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
         }
 
         const commands = args.commands.split("\n").filter((c) => c.trim())
@@ -440,18 +519,23 @@ export function createSshTools(
         const stopOnError = args.stop_on_error !== false
 
         for (const cmd of commands) {
-          const result = await executeCommand(
-            connection,
-            cmd.trim(),
-            mode,
-            extraBlocklist,
-            args.session_id,
-            {
-              cwd: args.cwd,
-              timeout: args.timeout || defaultTimeout,
-            },
-            ctx.directory,
-          )
+          let result: ExecResult
+          try {
+            result = await executeCommand(
+              connection,
+              cmd.trim(),
+              mode,
+              extraBlocklist,
+              args.session_id,
+              {
+                cwd: args.cwd,
+                timeout: args.timeout || defaultTimeout,
+              },
+              ctx.directory,
+            )
+          } finally {
+            rateLimiter.record(batchHostKey, true)
+          }
 
           results.push(result)
 
