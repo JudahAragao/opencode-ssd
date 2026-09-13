@@ -114,3 +114,22 @@ export function getAllowedCommands(mode: "full" | "restricted" | "read_only"): A
       return [] // Only blocklist applies in full mode
   }
 }
+
+/**
+ * Compile user-supplied regex patterns into allowlist entries.
+ * Invalid patterns are skipped so one bad entry never breaks validation.
+ */
+export function createAllowlistEntries(
+  patterns: string[],
+  description: string = "Custom allowlist pattern",
+): AllowlistEntry[] {
+  const entries: AllowlistEntry[] = []
+  for (const pattern of patterns) {
+    try {
+      entries.push({ pattern: new RegExp(pattern, "i"), description })
+    } catch {
+      // Skip invalid regex patterns
+    }
+  }
+  return entries
+}

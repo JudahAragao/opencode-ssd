@@ -1,5 +1,5 @@
 import { getBuiltinBlocklist, createCustomEntries, type CommandLevel, type BlocklistEntry } from "./blocklist.js"
-import { getAllowedCommands, type AllowlistEntry } from "./allowlist.js"
+import { getAllowedCommands, createAllowlistEntries } from "./allowlist.js"
 import type { SecurityMode } from "../config/schema.js"
 
 export type ValidationResult = {
@@ -27,6 +27,7 @@ export function validateCommand(
   command: string,
   mode: SecurityMode,
   extraBlocklist: string[] = [],
+  customAllowlist: string[] = [],
 ): ValidationResult {
   const trimmed = command.trim()
   if (!trimmed) {
@@ -67,8 +68,11 @@ export function validateCommand(
 
   // ── Step 2: In restricted/read_only mode, check allowlist ──
   if (mode === "restricted" || mode === "read_only") {
-    const allowedCommands = getAllowedCommands(mode)
-    const isAllowed = allowedCommands.some((entry) => entry.pattern.test(trimmed))
+    const builtinEntries = getAllowedCommands(mode)
+    // Custom patterns come from BOTH the plugin config `allowlist` option and
+    // the per-project custom allowlist managed via ssh.security_policy.
+    const customEntries = createAllowlistEntries(customAllowlist)
+    const isAllowed = [...builtinEntries, ...customEntries].some((entry) => entry.pattern.test(trimmed))
 
     if (!isAllowed) {
       return {
@@ -77,7 +81,8 @@ export function validateCommand(
         reason: `🔒 NOT ALLOWED in "${mode}" mode. Command not in the allowlist.`,
         suggestions: [
           `Switch to "full" mode to allow all non-blocked commands`,
-          `Add this command pattern to the allowlist via ssh.security_policy`,
+          `Add this command pattern to the allowlist via ssh.security_policy (add_allowlist)`,
+          `Add this command pattern to the "allowlist" option in your plugin config`,
         ],
       }
     }

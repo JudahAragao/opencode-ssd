@@ -2,7 +2,15 @@ import { tool, type ToolDefinition } from "@opencode-ai/plugin"
 import { SshSessionManager } from "./ssh/manager.js"
 import { executeCommand, type ExecResult } from "./ssh/executor.js"
 import { validateCommand, formatValidationResult } from "./security/validator.js"
-import { getPolicy, addBlocklistPattern, removeBlocklistPattern, addAllowlistPattern, removeAllowlistPattern, formatPolicy } from "./security/policy.js"
+import {
+  getPolicy,
+  getEffectiveCustomAllowlist,
+  addBlocklistPattern,
+  removeBlocklistPattern,
+  addAllowlistPattern,
+  removeAllowlistPattern,
+  formatPolicy,
+} from "./security/policy.js"
 import { readAuditLog, formatAuditLog, getAuditStats } from "./ssh/audit.js"
 import { sanitizeHost, sanitizeUsername, sanitizePath } from "./ssh/sanitizer.js"
 import {
@@ -138,6 +146,7 @@ export function createSshTools(
   maxSessions: number = 5,
   defaultTimeout: number = 30,
   extraBlocklist: string[] = [],
+  extraAllowlist: string[] = [],
   sshConfigPath?: string,
   autoConnect: boolean = false,
   opts: { strictHostKey?: boolean; knownHostsPath?: string; rateLimitPerMinute?: number; cooldownSeconds?: number; autoReconnect?: boolean } = {},
@@ -339,7 +348,9 @@ export function createSshTools(
         }
 
         // ── Validate command against blocklist BEFORE asking for permission ──
-        const validation = validateCommand(args.command, mode, extraBlocklist)
+        // Custom allowlist = plugin config `allowlist` + per-project policy patterns.
+        const customAllowlist = getEffectiveCustomAllowlist(ctx.directory, extraAllowlist)
+        const validation = validateCommand(args.command, mode, extraBlocklist, customAllowlist)
 
         // DESTRUCTIVE: 100% blocked, no permission prompt, no override
         if (validation.level === "destructive") {
@@ -413,6 +424,7 @@ export function createSshTools(
               sudo: args.sudo,
             },
             ctx.directory,
+            customAllowlist,
           )
         } finally {
           rateLimiter.record(hostKey, true)
@@ -465,9 +477,10 @@ export function createSshTools(
         }
 
         // ── Validate all commands first ──
+        const customAllowlist = getEffectiveCustomAllowlist(ctx.directory, extraAllowlist)
         const validations: Array<{ command: string; validation: ReturnType<typeof validateCommand> }> = []
         for (const cmd of commands) {
-          const v = validateCommand(cmd.trim(), mode, extraBlocklist)
+          const v = validateCommand(cmd.trim(), mode, extraBlocklist, customAllowlist)
           validations.push({ command: cmd.trim(), validation: v })
         }
 
@@ -532,6 +545,7 @@ export function createSshTools(
                 timeout: args.timeout || defaultTimeout,
               },
               ctx.directory,
+              customAllowlist,
             )
           } finally {
             rateLimiter.record(batchHostKey, true)
@@ -691,8 +705,9 @@ export function createSshTools(
       args: {
         command: tool.schema.string().describe("Command to validate"),
       },
-      async execute(args, _ctx) {
-        const validation = validateCommand(args.command, mode, extraBlocklist)
+      async execute(args, ctx) {
+        const customAllowlist = getEffectiveCustomAllowlist(ctx.directory, extraAllowlist)
+        const validation = validateCommand(args.command, mode, extraBlocklist, customAllowlist)
         return formatCheckResult(args.command, validation)
       },
     }),
@@ -738,7 +753,7 @@ export function createSshTools(
         switch (args.action) {
           case "view": {
             const policy = getPolicy(ctx.directory, mode)
-            return formatSecurityPolicy(policy)
+            return formatSecurityPolicy(policy, extraAllowlist)
           }
           case "add_blocklist": {
             const policy = addBlocklistPattern(ctx.directory, args.pattern!)

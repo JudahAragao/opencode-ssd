@@ -114,6 +114,19 @@ export function removeAllowlistPattern(projectDir: string, pattern: string): Sec
 }
 
 /**
+ * Merge the plugin config `allowlist` with the per-project custom allowlist
+ * (managed via ssh.security_policy add_allowlist). Returns a deduped list.
+ */
+export function getEffectiveCustomAllowlist(
+  projectDir: string,
+  configAllowlist: string[] = [],
+): string[] {
+  const policy = loadPolicy(projectDir)
+  const policyAllowlist: string[] = policy?.customAllowlist ?? []
+  return [...new Set([...configAllowlist, ...policyAllowlist])]
+}
+
+/**
  * Format the current policy for display.
  */
 export function formatPolicy(policy: SecurityPolicy): string {

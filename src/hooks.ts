@@ -1,5 +1,6 @@
 import type { Hooks } from "@opencode-ai/plugin"
 import { validateCommand } from "./security/validator.js"
+import { getEffectiveCustomAllowlist } from "./security/policy.js"
 import type { SecurityMode } from "./config/schema.js"
 
 /**
@@ -14,6 +15,8 @@ import type { SecurityMode } from "./config/schema.js"
 export function createSshHooks(
   mode: SecurityMode = "full",
   extraBlocklist: string[] = [],
+  extraAllowlist: string[] = [],
+  projectDir: string = "",
 ): Hooks {
   let systemInjected = false
 
@@ -65,7 +68,7 @@ export function createSshHooks(
           mode === "restricted"
             ? "**RESTRICTED MODE:** Only commands in the allowlist are permitted."
             : mode === "read_only"
-              ? "**READ-ONLY MODE:** Only read-only commands are permitted."
+              ? "**READ-ONLY MODE:** Only read-only commands + custom allowlist are permitted."
               : "**FULL MODE:** All non-blocked commands are permitted.",
         ].join("\n"),
       )
@@ -126,7 +129,9 @@ export function createSshHooks(
       if (!command) return
 
       // Final safety check: validate the command one more time
-      const validation = validateCommand(command, mode, extraBlocklist)
+      // Merge the config `allowlist` with the per-project policy allowlist.
+      const customAllowlist = getEffectiveCustomAllowlist(projectDir, extraAllowlist)
+      const validation = validateCommand(command, mode, extraBlocklist, customAllowlist)
 
       if (validation.level === "destructive") {
         throw new Error(

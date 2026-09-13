@@ -54,6 +54,7 @@ export async function executeCommand(
   sessionId: string,
   options: ExecOptions = {},
   projectDir: string = "",
+  customAllowlist: string[] = [],
 ): Promise<ExecResult> {
   const startTime = Date.now()
 
@@ -90,7 +91,7 @@ export async function executeCommand(
   }
 
   // ── Step 2: Security validation ──
-  const validation = validateCommand(command, mode, extraBlocklist)
+  const validation = validateCommand(command, mode, extraBlocklist, customAllowlist)
 
   // Destructive: ALWAYS blocked, no exception
   if (validation.level === "destructive") {
@@ -228,6 +229,7 @@ export async function executeCommandStream(
   sessionId: string,
   options: ExecOptions = {},
   projectDir: string = "",
+  customAllowlist: string[] = [],
   callbacks: ExecStreamCallbacks = {},
 ): Promise<ExecResult> {
   const startTime = Date.now()
@@ -251,7 +253,7 @@ export async function executeCommandStream(
     }
   }
 
-  const validation = validateCommand(command, mode, extraBlocklist)
+  const validation = validateCommand(command, mode, extraBlocklist, customAllowlist)
 
   if (validation.level === "destructive") {
     callbacks.onError?.(new Error(validation.reason))

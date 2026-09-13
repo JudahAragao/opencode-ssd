@@ -169,12 +169,15 @@ export function formatCheckResult(
 /**
  * Format a security policy for display.
  */
-export function formatSecurityPolicy(policy: {
-  mode: string
-  extraBlocklist: string[]
-  customAllowlist: string[]
-  updatedAt: string
-}): string {
+export function formatSecurityPolicy(
+  policy: {
+    mode: string
+    extraBlocklist: string[]
+    customAllowlist: string[]
+    updatedAt: string
+  },
+  configAllowlist: string[] = [],
+): string {
   const lines = [
     "## SSH Security Policy",
     "",
@@ -182,6 +185,14 @@ export function formatSecurityPolicy(policy: {
     `**Last Updated:** ${policy.updatedAt}`,
     "",
   ]
+
+  if (configAllowlist.length > 0) {
+    lines.push("### Config Allowlist Patterns (plugin settings)")
+    for (const p of configAllowlist) {
+      lines.push(`- \`${p}\``)
+    }
+    lines.push("")
+  }
 
   if (policy.extraBlocklist.length > 0) {
     lines.push("### Extra Blocklist Patterns")
@@ -192,7 +203,7 @@ export function formatSecurityPolicy(policy: {
   }
 
   if (policy.customAllowlist.length > 0) {
-    lines.push("### Custom Allowlist Patterns")
+    lines.push("### Custom Allowlist Patterns (via ssh.security_policy)")
     for (const p of policy.customAllowlist) {
       lines.push(`- \`${p}\``)
     }

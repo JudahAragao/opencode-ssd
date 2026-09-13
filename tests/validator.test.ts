@@ -141,6 +141,53 @@ describe("Command Validator", () => {
     })
   })
 
+  describe("Custom allowlist patterns (config + policy)", () => {
+    test("allows a command in restricted mode when pattern matches", () => {
+      const result = validateCommand("docker stop honeypot-web", "restricted", [], ["docker stop .*"])
+      expect(result.safe).toBe(true)
+      expect(result.level).toBe("safe")
+    })
+
+    test("supports config-style generic patterns", () => {
+      const result = validateCommand("docker rm honeypot-web", "restricted", [], ["docker rm .*", "docker stop .*"])
+      expect(result.safe).toBe(true)
+    })
+
+    test("still blocks commands not covered by custom allowlist", () => {
+      const result = validateCommand("kill -9 1234", "restricted", [], ["docker stop .*"])
+      expect(result.safe).toBe(false)
+      expect(result.level).toBe("risky")
+    })
+
+    test("destructive blocklist always wins over allowlist", () => {
+      const result = validateCommand("rm -rf /", "restricted", [], [".*"])
+      expect(result.safe).toBe(false)
+      expect(result.level).toBe("destructive")
+    })
+
+    test("risky blocklist is evaluated before the allowlist", () => {
+      const result = validateCommand("systemctl stop nginx", "restricted", [], [".*"])
+      expect(result.safe).toBe(false)
+      expect(result.level).toBe("risky")
+    })
+
+    test("read_only mode respects custom allowlist", () => {
+      const result = validateCommand("docker stop app", "read_only", [], ["docker stop .*"])
+      expect(result.safe).toBe(true)
+    })
+
+    test("invalid regex patterns are skipped without throwing", () => {
+      const result = validateCommand("docker ps", "restricted", [], ["[invalid("])
+      expect(result.safe).toBe(true)
+    })
+
+    test("custom allowlist is ignored in full mode", () => {
+      const result = validateCommand("docker exec x", "full", [], ["not-used"])
+      expect(result.safe).toBe(true)
+      expect(result.level).toBe("safe")
+    })
+  })
+
   describe("isReadOnlyCommand", () => {
     test("recognizes read-only commands", () => {
       expect(isReadOnlyCommand("ls")).toBe(true)
