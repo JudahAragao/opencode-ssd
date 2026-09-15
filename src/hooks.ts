@@ -1,6 +1,7 @@
 import type { Hooks } from "@opencode-ai/plugin"
 import { validateCommand } from "./security/validator.js"
 import { getEffectiveCustomAllowlist } from "./security/policy.js"
+import { PLUGIN_VERSION } from "./version.js"
 import type { SecurityMode } from "./config/schema.js"
 
 /**
@@ -30,6 +31,7 @@ export function createSshHooks(
       output.system.push(
         [
           "## SSH Access Plugin (opencode-ssh)",
+          `**Version:** ${PLUGIN_VERSION}`,
           "",
           "You have SSH access to remote servers via the opencode-ssh plugin.",
           "",
@@ -59,10 +61,14 @@ export function createSshHooks(
           "3. **NEVER store credentials in chat messages.**",
           "   Use \`ssh.connect\` with key-based authentication when possible.",
           "",
-          "4. **Always use \`ssh.check_command\` to preview command safety**",
+          "4. **Security policy changes are ALWAYS user-confirmed.**",
+          "   Adding/removing allowlist or blocklist patterns via \`ssh.security_policy\`",
+          "   requires explicit user approval every single time. Never bypass it.",
+          "",
+          "5. **Always use \`ssh.check_command\` to preview command safety**",
           "   before running potentially dangerous operations.",
           "",
-          "5. **All commands are logged in the audit trail.**",
+          "6. **All commands are logged in the audit trail.**",
           "   Use \`ssh.audit_log\` to review execution history.",
           "",
           mode === "restricted"
@@ -80,7 +86,9 @@ export function createSshHooks(
     // Permission handling
     // ═══════════════════════════════════════════════════════════════
     "permission.ask": async (input, output) => {
-      const pattern = typeof input.pattern === "string" ? input.pattern : ""
+      const raw = input.pattern
+      const patterns = Array.isArray(raw) ? raw : raw ? [raw] : []
+      const pattern = patterns.join(" ")
 
       // Auto-approve read-only operations
       if (
@@ -89,6 +97,26 @@ export function createSshHooks(
         pattern.includes("ssh.audit_log")
       ) {
         output.status = "allow"
+        return
+      }
+
+      // Viewing the security policy is read-only — no prompt needed.
+      if (pattern.includes("ssh.security_policy.view") || pattern.includes("view")) {
+        output.status = "allow"
+        return
+      }
+
+      // Security policy MUTATIONS (add/remove allowlist or blocklist) are
+      // NEVER auto-approved. The user must explicitly confirm/deny every
+      // single change, regardless of any global/per-tool permission rules.
+      if (
+        pattern.includes("ssh.security_policy.modify") ||
+        pattern.includes("add_allowlist") ||
+        pattern.includes("remove_allowlist") ||
+        pattern.includes("add_blocklist") ||
+        pattern.includes("remove_blocklist")
+      ) {
+        output.status = "ask"
         return
       }
 

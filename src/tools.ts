@@ -740,15 +740,35 @@ export function createSshTools(
           }
         }
 
-        await ctx.ask({
-          permission: "ssh.security_policy",
-          patterns: [`${args.action}: ${args.pattern || ""}`],
-          always: [],
-          metadata: {
-            action: args.action,
-            pattern: args.pattern,
-          },
-        })
+        const isMutation = args.action !== "view"
+
+        // Security policy MUTATIONS (add/remove allowlist or blocklist) always
+        // require explicit user confirmation via opencode's permission system.
+        // `always: []` guarantees every change is re-confirmed — the LLM can
+        // never self-grant an allowlist entry without the user clicking allow.
+        if (isMutation) {
+          await ctx.ask({
+            permission: "ssh.security_policy.modify",
+            patterns: [`${args.action}: ${args.pattern || ""}`],
+            always: [],
+            metadata: {
+              action: args.action,
+              pattern: args.pattern,
+              change_type: "security_policy_mutation",
+            },
+          })
+        } else {
+          // Viewing the policy is read-only and harmless — approved without
+          // a prompt (see the permission.ask hook in hooks.ts).
+          await ctx.ask({
+            permission: "ssh.security_policy.view",
+            patterns: ["view"],
+            always: ["view"],
+            metadata: {
+              action: "view",
+            },
+          })
+        }
 
         switch (args.action) {
           case "view": {
