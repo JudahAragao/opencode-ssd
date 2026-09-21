@@ -1,20 +1,14 @@
-import { DEFAULT_CONFIG, type SshPluginConfigType } from "./schema.js"
+import { SshPluginConfig, type SshPluginConfigType } from "./schema.js"
 
 /**
  * Get merged configuration with user overrides.
+ * Uses Zod parsing to validate input, apply defaults, and reject unknown keys.
  */
 export function resolveConfig(userConfig?: Record<string, unknown>): SshPluginConfigType {
-  if (!userConfig) return { ...DEFAULT_CONFIG }
-
-  const merged: Record<string, unknown> = { ...DEFAULT_CONFIG }
-
-  for (const [key, value] of Object.entries(userConfig)) {
-    if (value !== undefined && value !== null) {
-      merged[key] = value
-    }
+  if (!userConfig || Object.keys(userConfig).length === 0) {
+    return SshPluginConfig.parse({})
   }
-
-  return merged as SshPluginConfigType
+  return SshPluginConfig.parse(userConfig)
 }
 
 /**

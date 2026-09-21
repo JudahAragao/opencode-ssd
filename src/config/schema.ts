@@ -50,20 +50,5 @@ export const SshPluginConfig = z
     /** Minimum delay in seconds between commands on the same host (cooldown) */
     cooldown_seconds: z.number().int().min(0).max(3600).default(0),
   })
-  .strict()
 
 export type SshPluginConfigType = z.infer<typeof SshPluginConfig>
-
-export const DEFAULT_CONFIG: SshPluginConfigType = {
-  mode: "full",
-  max_sessions: 5,
-  default_timeout: 30,
-  audit_enabled: true,
-  blocklist_extra: [],
-  allowlist: [],
-  auto_connect: false,
-  auto_reconnect: true,
-  strict_host_key: false,
-  rate_limit_per_minute: 120,
-  cooldown_seconds: 0,
-}
