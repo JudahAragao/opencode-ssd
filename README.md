@@ -60,6 +60,31 @@ Or with configuration:
 | `rate_limit_per_minute` | number | `120` | Max commands allowed per host per minute |
 | `cooldown_seconds` | number | `0` | Minimum delay (seconds) between commands on the same host |
 
+### OpenAI-compatible tool-name mode
+
+Strict OpenAI-compatible providers, including some NVIDIA NIM deployments,
+reject dots in tool names. By default this plugin keeps names such as
+`ssh.connect` and `ssh.exec`. To expose provider-safe names such as
+`ssh_connect` and `ssh_exec`, enable the shared compatibility mode before
+starting OpenCode:
+
+```bash
+OPENCODE_SAFE_TOOL_NAMES=1 opencode
+```
+
+When `opencode-telos` is installed, the mode can also be persisted with:
+
+```text
+/sdd tool-names safe
+/sdd tool-names canonical
+/sdd tool-names status
+```
+
+Restart OpenCode after changing the mode because the tool catalog is registered
+during startup. The persisted setting is `.opencode/tool-names.json` and is
+shared by both plugins. Hooks and security policies continue to use the
+canonical `ssh.*` names internally.
+
 ## SSH Config Integration
 
 The plugin can reuse your existing `~/.ssh/config` (or a custom path via `ssh_config_path`):

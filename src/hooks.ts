@@ -3,6 +3,7 @@ import { validateCommand } from "./security/validator.js"
 import { getEffectiveCustomAllowlist } from "./security/policy.js"
 import { PLUGIN_VERSION } from "./version.js"
 import type { SecurityMode } from "./config/schema.js"
+import { canonicalToolName, restoreToolNames, rewriteToolText, SSH_TOOL_NAMES } from "./tool-names.js"
 
 /**
  * Create the SSH plugin hooks.
@@ -18,6 +19,7 @@ export function createSshHooks(
   extraBlocklist: string[] = [],
   extraAllowlist: string[] = [],
   projectDir: string = "",
+  safeToolNames = false,
 ): Hooks {
   let systemInjected = false
 
@@ -29,7 +31,7 @@ export function createSshHooks(
       if (systemInjected) return
 
       output.system.push(
-        [
+        rewriteToolText([
           "## SSH Access Plugin (opencode-ssh)",
           `**Version:** ${PLUGIN_VERSION}`,
           "",
@@ -76,7 +78,7 @@ export function createSshHooks(
             : mode === "read_only"
               ? "**READ-ONLY MODE:** Only read-only commands + custom allowlist are permitted."
               : "**FULL MODE:** All non-blocked commands are permitted.",
-        ].join("\n"),
+        ].join("\n"), safeToolNames),
       )
 
       systemInjected = true
@@ -87,7 +89,9 @@ export function createSshHooks(
     // ═══════════════════════════════════════════════════════════════
     "permission.ask": async (input, output) => {
       const raw = input.pattern
-      const patterns = Array.isArray(raw) ? raw : raw ? [raw] : []
+      const patterns = (Array.isArray(raw) ? raw : raw ? [raw] : []).map((pattern) =>
+        restoreToolNames(pattern, SSH_TOOL_NAMES, safeToolNames),
+      )
       const pattern = patterns.join(" ")
 
       // Auto-approve read-only operations
@@ -148,8 +152,9 @@ export function createSshHooks(
     // Pre-execution validation (additional safety net)
     // ═══════════════════════════════════════════════════════════════
     "tool.execute.before": async (input, output) => {
+      const toolName = canonicalToolName(input.tool, safeToolNames)
       // Only intercept ssh.exec calls
-      if (input.tool !== "ssh.exec" && input.tool !== "ssh.exec_batch") return
+      if (toolName !== "ssh.exec" && toolName !== "ssh.exec_batch") return
 
       const args = output.args as Record<string, unknown>
       const command = args.command as string | undefined
@@ -191,7 +196,8 @@ export function createSshHooks(
     // Post-execution metadata
     // ═══════════════════════════════════════════════════════════════
     "tool.execute.after": async (input, output) => {
-      if (!input.tool.startsWith("ssh.")) return
+      const toolName = canonicalToolName(input.tool, safeToolNames)
+      if (!toolName.startsWith("ssh.")) return
 
       const timestamp = new Date().toISOString()
       if (output.metadata) {

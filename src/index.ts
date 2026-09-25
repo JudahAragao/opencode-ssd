@@ -3,6 +3,7 @@ import { createSshTools } from "./tools.js"
 import { createSshHooks } from "./hooks.js"
 import { resolveConfig } from "./config/defaults.js"
 import type { SshPluginConfigType } from "./config/schema.js"
+import { projectToolNames, safeToolNamesEnabled } from "./tool-names.js"
 
 const SshPlugin: Plugin = async (input, options) => {
   // ── Resolve configuration ──
@@ -28,15 +29,17 @@ const SshPlugin: Plugin = async (input, options) => {
       autoReconnect: config.auto_reconnect,
     },
   )
+  const safeToolNames = safeToolNamesEnabled(projectDir)
   const hooks = createSshHooks(
     config.mode,
     config.blocklist_extra,
     config.allowlist,
     projectDir,
+    safeToolNames,
   )
 
   return {
-    tool: tools,
+    tool: projectToolNames(tools, safeToolNames),
     ...hooks,
   }
 }
