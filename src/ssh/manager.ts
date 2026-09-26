@@ -59,10 +59,10 @@ export class SshSessionManager {
   }
 
   /**
-   * Close a session by ID.
+   * Close a session by ID or alias.
    */
-  async closeSession(id: string): Promise<boolean> {
-    const connection = this.sessions.get(id)
+  async closeSession(identifier: string): Promise<boolean> {
+    const connection = this.getSession(identifier)
     if (!connection) return false
 
     connection.disconnect()
@@ -72,7 +72,14 @@ export class SshSessionManager {
       this.aliases.delete(connection.config.alias.toLowerCase())
     }
 
-    this.sessions.delete(id)
+    // The map is keyed by the generated ID, which can differ from the
+    // identifier when an alias was passed in.
+    for (const [id, candidate] of this.sessions) {
+      if (candidate === connection) {
+        this.sessions.delete(id)
+        break
+      }
+    }
     return true
   }
 
