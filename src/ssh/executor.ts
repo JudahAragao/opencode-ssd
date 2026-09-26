@@ -120,9 +120,10 @@ export async function executeCommand(
     return result
   }
 
-  // Risky: The tool.ts caller handles the permission prompt via ctx.ask()
-  // If we reach here, the permission was already granted by the hook system.
-  // We just log that it was a risky command that was approved.
+  // Risky: The SDK v2 permission flow handles the prompt (permission hook
+  // evaluates the tool's declared action). If we reach here, the permission
+  // was already granted, so we just log that it was a risky command that was
+  // approved.
 
   // Not in allowlist: blocked in restricted/read_only mode
   if (validation.level === "not_in_allowlist") {

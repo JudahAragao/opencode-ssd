@@ -3,6 +3,13 @@ import { validateCommand } from "./security/validator.js"
 import { getEffectiveCustomAllowlist } from "./security/policy.js"
 import { PLUGIN_VERSION } from "./version.js"
 import type { SecurityMode } from "./config/schema.js"
+import {
+  SSH_NAMESPACE,
+  isKnownSshTool,
+  isSshTool,
+  isSshToolName,
+  toEffectiveName,
+} from "./naming.js"
 
 export interface SshHookOptions {
   mode?: SecurityMode
@@ -19,17 +26,16 @@ export interface SshHookOptions {
  * and this table owns the decision. Read-only operations are allowed;
  * anything that reaches a remote host or mutates the policy asks every
  * time, because the plugin no longer offers an "allow always" shortcut.
+ *
+ * Actions are compared after automatic normalization, so both the effective
+ * id (`ssh_exec`) and the dotted spelling (`ssh.exec`) decide identically.
  */
 const READ_ONLY_ACTIONS = new Set([
-  "ssh.list_sessions",
-  "ssh.check_command",
-  "ssh.audit_log",
-  "ssh.security_policy",
+  "ssh_list_sessions",
+  "ssh_check_command",
+  "ssh_audit_log",
+  "ssh_security_policy",
 ])
-
-function isSshAction(action: string): boolean {
-  return action === "ssh" || action.startsWith("ssh.")
-}
 
 function systemPrompt(mode: SecurityMode): string {
   return [
@@ -39,17 +45,17 @@ function systemPrompt(mode: SecurityMode): string {
     "You have SSH access to remote servers via the opencode-ssh plugin.",
     "",
     "### Available Tools",
-    "- `ssh.connect` — Establish SSH connection to a remote server",
-    "- `ssh.disconnect` — Close an SSH session",
-    "- `ssh.list_sessions` — List active SSH sessions",
-    "- `ssh.exec` — Execute a command on a remote server",
-    "- `ssh.exec_batch` — Execute multiple commands in sequence",
-    "- `ssh.upload` — Upload a file via SCP/SFTP",
-    "- `ssh.download` — Download a file via SCP/SFTP",
-    "- `ssh.check_command` — Check command safety without executing",
-    "- `ssh.security_policy` — View the current security policy",
-    "- `ssh.security_policy_modify` — Add/remove blocklist or allowlist patterns",
-    "- `ssh.audit_log` — View command execution audit trail",
+    "- `ssh_connect` — Establish SSH connection to a remote server",
+    "- `ssh_disconnect` — Close an SSH session",
+    "- `ssh_list_sessions` — List active SSH sessions",
+    "- `ssh_exec` — Execute a command on a remote server",
+    "- `ssh_exec_batch` — Execute multiple commands in sequence",
+    "- `ssh_upload` — Upload a file via SCP/SFTP",
+    "- `ssh_download` — Download a file via SCP/SFTP",
+    "- `ssh_check_command` — Check command safety without executing",
+    "- `ssh_security_policy` — View the current security policy",
+    "- `ssh_security_policy_modify` — Add/remove blocklist or allowlist patterns",
+    "- `ssh_audit_log` — View command execution audit trail",
     "",
     "### Security Rules",
     `**Mode:** ${mode}`,
@@ -63,18 +69,18 @@ function systemPrompt(mode: SecurityMode): string {
     "   security policy all prompt you each time. Never work around the prompt.",
     "",
     "3. **NEVER store credentials in chat messages.**",
-    "   Use \`ssh.connect\` with key-based authentication when possible.",
+    "   Use \`ssh_connect\` with key-based authentication when possible.",
     "",
     "4. **Security policy changes are ALWAYS user-confirmed.**",
     "   Adding/removing allowlist or blocklist patterns via",
-    "   \`ssh.security_policy_modify\` requires explicit user approval every",
+    "   \`ssh_security_policy_modify\` requires explicit user approval every",
     "   single time. Never bypass it.",
     "",
-    "5. **Always use \`ssh.check_command\` to preview command safety**",
+    "5. **Always use \`ssh_check_command\` to preview command safety**",
     "   before running potentially dangerous operations.",
     "",
     "6. **All commands are logged in the audit trail.**",
-    "   Use \`ssh.audit_log\` to review execution history.",
+    "   Use \`ssh_audit_log\` to review execution history.",
     "",
     mode === "restricted"
       ? "**RESTRICTED MODE:** Only commands in the allowlist are permitted."
@@ -92,6 +98,10 @@ function systemPrompt(mode: SecurityMode): string {
  * - permission "evaluate": Decides allow/ask/deny for every SSH action
  * - tool "execute.before": Pre-execution validation (additional safety net)
  * - tool "execute.after": Post-execution audit metadata
+ *
+ * Tool/action names are normalized automatically in every hook: the effective
+ * underscored id (`ssh_exec`) and the dotted spelling (`ssh.exec`) are both
+ * accepted and decide identically.
  *
  * Returns the disposal functions, in registration order, so the plugin can
  * release them from the cleanup returned by `setup`.
@@ -131,8 +141,10 @@ export async function registerSshHooks(
   // ═══════════════════════════════════════════════════════════════
   await track(
     ctx.permission.hook("evaluate", (event) => {
-      if (!isSshAction(event.action)) return
-      event.effect = READ_ONLY_ACTIONS.has(event.action) ? "allow" : "ask"
+      if (!isSshToolName(event.action)) return
+      const action = toEffectiveName(event.action)
+      if (action === SSH_NAMESPACE) return
+      event.effect = READ_ONLY_ACTIONS.has(action) ? "allow" : "ask"
     }),
   )
 
@@ -141,7 +153,7 @@ export async function registerSshHooks(
   // ═══════════════════════════════════════════════════════════════
   await track(
     ctx.tool.hook("execute.before", (event) => {
-      if (event.tool !== "ssh.exec" && event.tool !== "ssh.exec_batch") return
+      if (!isSshTool(event.tool, ["exec", "exec_batch"])) return
 
       const args = event.input as { command?: string }
       const command = args?.command
@@ -184,7 +196,7 @@ export async function registerSshHooks(
   // ═══════════════════════════════════════════════════════════════
   await track(
     ctx.tool.hook("execute.after", (event) => {
-      if (!isSshAction(event.tool)) return
+      if (!isKnownSshTool(event.tool)) return
       if (event.status !== "completed") return
 
       const metadata = event.result.metadata ?? {}

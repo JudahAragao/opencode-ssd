@@ -35,7 +35,7 @@ describe("SshSessionManager", () => {
   })
 
   // `closeSession` is documented to accept "Session ID or alias", and the
-  // `ssh.disconnect` tool forwards whatever the caller passes. It used to look
+  // `ssh_disconnect` tool forwards whatever the caller passes. It used to look
   // up `sessions` by ID only, so closing by alias always reported failure and
   // left the session open.
   describe("closing by alias", () => {

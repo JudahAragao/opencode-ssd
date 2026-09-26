@@ -115,7 +115,7 @@ export function removeAllowlistPattern(projectDir: string, pattern: string): Sec
 
 /**
  * Merge the plugin config `allowlist` with the per-project custom allowlist
- * (managed via ssh.security_policy add_allowlist). Returns a deduped list.
+ * (managed via ssh_security_policy add_allowlist). Returns a deduped list.
  */
 export function getEffectiveCustomAllowlist(
   projectDir: string,

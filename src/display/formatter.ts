@@ -98,7 +98,7 @@ export function formatConnectResult(
     `- **Host:** ${username}@${host}:${port}`,
     `- **Status:** 🟢 Connected`,
     "",
-    `Use \`ssh.exec\` with session_id=\`${sessionId}\` to run commands.`,
+    `Use \`ssh_exec\` with session_id=\`${sessionId}\` to run commands.`,
   ].join("\n")
 }
 
@@ -203,7 +203,7 @@ export function formatSecurityPolicy(
   }
 
   if (policy.customAllowlist.length > 0) {
-    lines.push("### Custom Allowlist Patterns (via ssh.security_policy)")
+    lines.push("### Custom Allowlist Patterns (via ssh_security_policy)")
     for (const p of policy.customAllowlist) {
       lines.push(`- \`${p}\``)
     }

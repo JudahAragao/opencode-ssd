@@ -61,10 +61,10 @@ Or with configuration:
 | `default_timeout` | number | `30` | Default command timeout in seconds |
 | `audit_enabled` | boolean | `true` | Enable audit logging |
 | `blocklist_extra` | string[] | `[]` | Additional regex patterns to block |
-| `allowlist` | string[] | `[]` | Additional allowed patterns (restricted/read_only mode) — merged with the per-project allowlist from `ssh.security_policy` |
+| `allowlist` | string[] | `[]` | Additional allowed patterns (restricted/read_only mode) — merged with the per-project allowlist from `ssh_security_policy` |
 | `ssh_config_path` | string | `~/.ssh/config` | Path to the SSH config file used to resolve host aliases, defaults, proxies, and auto-connect targets |
 | `auto_connect` | boolean | `false` | Connect automatically at startup to every `Host` entry in the ssh config that has a `HostName` (with retry/backoff) |
-| `auto_reconnect` | boolean | `true` | Reconnect a dropped session automatically before the next `ssh.exec`/`ssh.upload`/`ssh.download` (key-authenticated sessions) |
+| `auto_reconnect` | boolean | `true` | Reconnect a dropped session automatically before the next `ssh_exec`/`ssh_upload`/`ssh_download` (key-authenticated sessions) |
 | `strict_host_key` | boolean | `false` | Reject connections whose host key is not an exact match in `~/.ssh/known_hosts` (MITM protection) |
 | `rate_limit_per_minute` | number | `120` | Max commands allowed per host per minute |
 | `cooldown_seconds` | number | `0` | Minimum delay (seconds) between commands on the same host |
@@ -73,7 +73,7 @@ Or with configuration:
 
 The plugin can reuse your existing `~/.ssh/config` (or a custom path via `ssh_config_path`):
 
-- **Host resolution** — `ssh.connect(host="myalias")` resolves the alias to its `HostName`, and automatically applies the `User`, `Port` and `IdentityFile` from the config. `username`, `port` and `auth_method`/`key_path` become optional when configured.
+- **Host resolution** — `ssh_connect(host="myalias")` resolves the alias to its `HostName`, and automatically applies the `User`, `Port` and `IdentityFile` from the config. `username`, `port` and `auth_method`/`key_path` become optional when configured.
 - **ProxyJump / ProxyCommand** — `ProxyJump` and `ProxyCommand` directives in the ssh config are honored, so connections route through bastion/jump hosts transparently.
 - **Auto-connect** — with `"auto_connect": true`, the plugin connects at startup to every `Host` entry that has a `HostName`, using the configured key (or `~/.ssh/id_rsa`). Unreachable hosts are retried with backoff and skipped without blocking startup.
 - **Missing file alert** — if `ssh_config_path` points to a file that does not exist, the plugin warns on connect instead of silently ignoring the setting.
@@ -92,7 +92,7 @@ Host prod-db
     ProxyJump jumpuser@bastion:2200
 ```
 
-With `ssh.connect(host="prod-web")` the plugin connects to `deploy@10.0.0.10:2222` using `~/.ssh/prod_key`. `prod-db` is reached tunneled through `bastion`.
+With `ssh_connect(host="prod-web")` the plugin connects to `deploy@10.0.0.10:2222` using `~/.ssh/prod_key`. `prod-db` is reached tunneled through `bastion`.
 
 ## Security Modes
 
@@ -118,102 +118,124 @@ Restricted and read-only modes respect allowlist patterns from **both** sources 
    }]
    ```
 
-2. **Per-project policy** — at runtime via `ssh.security_policy_modify`:
+2. **Per-project policy** — at runtime via `ssh_security_policy_modify`:
 
    ```
-   ssh.security_policy_modify(action="add_allowlist", pattern="docker stop .*")
+   ssh_security_policy_modify(action="add_allowlist", pattern="docker stop .*")
    ```
 
    Patterns persist in `<project>/.opencode-ssh/policy.json` and are merged with the config patterns on every execution. Either source alone is enough to permit a matching command in restricted/read_only mode. The destructive blocklist always wins over any allowlist entry.
 
+## Tool Names (Namespace Normalization)
+
+The plugin registers all tools through the official OpenCode v2 namespace
+mechanism: `editor.namespace({ name: "ssh", … })` plus a short leaf name per
+tool. The host derives each tool's **effective id** by joining the namespace
+and the leaf with `_` — dots in namespaces and provider-unsupported characters
+normalize to `_` automatically (see the
+[plugin docs](https://opencode.ai/v2/docs/build/plugins/), Tools section).
+
+The effective ids are therefore:
+
+`ssh_connect`, `ssh_disconnect`, `ssh_list_sessions`, `ssh_exec`,
+`ssh_exec_batch`, `ssh_upload`, `ssh_download`, `ssh_check_command`,
+`ssh_security_policy`, `ssh_security_policy_modify`, `ssh_audit_log`
+
+These are the names every provider sees (tool names are always
+provider-safe — no `.`), the ids the permission hook evaluates, and the
+spellings used throughout this README. Every hook, permission decision, and
+public string in the plugin **automatically accepts both spellings** — the
+effective id (`ssh_exec`) and the dotted canonical form (`ssh.exec`) decide
+identically — so either form can be used interchangeably.
+
 ## Commands (Tools)
 
-### `ssh.connect`
+### `ssh_connect`
 Establish an SSH connection to a remote server.
 
 ```
-ssh.connect(host="192.168.1.100", username="admin", auth_method="key")
+ssh_connect(host="192.168.1.100", username="admin", auth_method="key")
 ```
 
-### `ssh.disconnect`
+### `ssh_disconnect`
 Close an SSH session.
 
 ```
-ssh.disconnect(session_id="ssh-abc123")
+ssh_disconnect(session_id="ssh-abc123")
 ```
 
-### `ssh.list_sessions`
+### `ssh_list_sessions`
 List all active SSH sessions.
 
 ```
-ssh.list_sessions()
+ssh_list_sessions()
 ```
 
-### `ssh.exec`
+### `ssh_exec`
 Execute a command on a remote server.
 
 ```
-ssh.exec(session_id="prod-server", command="docker ps -a")
+ssh_exec(session_id="prod-server", command="docker ps -a")
 ```
 
-### `ssh.exec_batch`
+### `ssh_exec_batch`
 Execute multiple commands in sequence.
 
 ```
-ssh.exec_batch(session_id="prod-server", commands="cd /app\nls -la\ndocker ps")
+ssh_exec_batch(session_id="prod-server", commands="cd /app\nls -la\ndocker ps")
 ```
 
-### `ssh.upload`
+### `ssh_upload`
 Upload a file via SCP.
 
 ```
-ssh.upload(session_id="prod-server", local_path="./config.yml", remote_path="/app/config.yml")
+ssh_upload(session_id="prod-server", local_path="./config.yml", remote_path="/app/config.yml")
 ```
 
-### `ssh.download`
+### `ssh_download`
 Download a file via SCP.
 
 ```
-ssh.download(session_id="prod-server", remote_path="/var/log/app.log", local_path="./app.log")
+ssh_download(session_id="prod-server", remote_path="/var/log/app.log", local_path="./app.log")
 ```
 
-### `ssh.check_command`
+### `ssh_check_command`
 Check if a command is safe (dry-run).
 
 ```
-ssh.check_command(command="rm -rf /tmp/cache")
+ssh_check_command(command="rm -rf /tmp/cache")
 ```
 
-### `ssh.security_policy`
+### `ssh_security_policy`
 View the active security policy (read-only).
 
 ```
-ssh.security_policy()
+ssh_security_policy()
 ```
 
-### `ssh.security_policy_modify`
+### `ssh_security_policy_modify`
 Modify the security policy at runtime.
 
 ```
-ssh.security_policy_modify(action="add_blocklist", pattern="custom-dangerous-.*")
-ssh.security_policy_modify(action="remove_blocklist", pattern="custom-dangerous-.*")
-ssh.security_policy_modify(action="add_allowlist", pattern="docker stop .*")
-ssh.security_policy_modify(action="remove_allowlist", pattern="docker stop .*")
+ssh_security_policy_modify(action="add_blocklist", pattern="custom-dangerous-.*")
+ssh_security_policy_modify(action="remove_blocklist", pattern="custom-dangerous-.*")
+ssh_security_policy_modify(action="add_allowlist", pattern="docker stop .*")
+ssh_security_policy_modify(action="remove_allowlist", pattern="docker stop .*")
 ```
 
-> **User confirmation required:** `ssh.security_policy` is read-only and does
-> not prompt. Every call to `ssh.security_policy_modify` triggers opencode's
+> **User confirmation required:** `ssh_security_policy` is read-only and does
+> not prompt. Every call to `ssh_security_policy_modify` triggers opencode's
 > permission prompt and is re-confirmed by the user **every single time** — the
 > LLM can never self-grant an allowlist entry without explicit user approval.
 > That is why policy mutation lives in its own tool rather than being an
 > `action` on the read tool.
 
-### `ssh.audit_log`
+### `ssh_audit_log`
 View the command audit trail.
 
 ```
-ssh.audit_log(limit=20)
-ssh.audit_log(session_id="prod-server", command_filter="docker")
+ssh_audit_log(limit=20)
+ssh_audit_log(session_id="prod-server", command_filter="docker")
 ```
 
 ## Migrating to v2.0.0
@@ -235,15 +257,15 @@ and the `plugins` array with an object.
 The `./server` export was removed, and the peer dependency is now
 `@opencode/plugin@^2.0.18`.
 
-### 2. Tool names are canonical only
+### 2. Tool names are effective ids (`ssh_*`)
 
 The OpenAI-compatible `tool-names` mode (`OPENCODE_SAFE_TOOL_NAMES`,
 `/sdd tool-names`, `.opencode/tool-names.json`) has been **removed** from this
-plugin. Tools are always registered with their canonical dotted names
-(`ssh.connect`, `ssh.exec`, …) and there is no underscored projection.
-
-If you still need provider-safe names, that capability now lives in
-`opencode-telos`, not here.
+plugin — it is no longer needed: the v2 host normalizes namespace-qualified
+names automatically. Tools are registered under the `ssh` namespace with short
+leaf names, and the effective ids (`ssh.exec` → `ssh_exec`, `ssh.exec_batch` →
+`ssh_exec_batch`, …) are provider-safe by construction. There is no dotted
+tool name at the provider boundary.
 
 ### 3. `ssh.security_policy` is split in two
 
@@ -252,8 +274,8 @@ mutating it are separate tools:
 
 | Operation | v1 | v2 |
 |---|---|---|
-| View policy | `ssh.security_policy(action="view")` | `ssh.security_policy()` |
-| Mutate policy | `ssh.security_policy(action="add_allowlist", pattern=…)` | `ssh.security_policy_modify(action="add_allowlist", pattern=…)` |
+| View policy | `ssh.security_policy(action="view")` | `ssh_security_policy()` |
+| Mutate policy | `ssh.security_policy(action="add_allowlist", pattern=…)` | `ssh_security_policy_modify(action="add_allowlist", pattern=…)` |
 
 The same `action` values are otherwise unchanged, and persisted patterns still
 live in `<project>/.opencode-ssh/policy.json`.
@@ -293,7 +315,7 @@ These commands require your explicit approval each time:
 - Passwords and SSH keys are **never** stored in logs or output
 - Session info only contains host, username, and port
 - Passwords are cleared from memory right after a successful handshake
-- For this reason password-authenticated sessions do **not** auto-reconnect (re-issue `ssh.connect`); key-authenticated sessions reconnect automatically from the on-disk key
+- For this reason password-authenticated sessions do **not** auto-reconnect (re-issue `ssh_connect`); key-authenticated sessions reconnect automatically from the on-disk key
 - All sessions are destroyed when the plugin is disposed
 
 ## Audit Log
@@ -308,7 +330,7 @@ All commands are logged in `.opencode-ssh/audit.jsonl` with:
 - Duration
 - Matched security rule (if any)
 
-View the audit log with `ssh.audit_log`.
+View the audit log with `ssh_audit_log`.
 
 ## Development
 

@@ -1,6 +1,6 @@
 /**
  * SSH config (~/.ssh/config) parser.
- * Reads alias, HostName, User, Port and IdentityFile so ssh.connect
+ * Reads alias, HostName, User, Port and IdentityFile so ssh_connect
  * can reuse your normal SSH configuration and auto_connect knows what to hook.
  */
 import { readFileSync, existsSync } from "fs"

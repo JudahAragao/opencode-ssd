@@ -2,6 +2,7 @@ import { Plugin } from "@opencode/plugin"
 import { createSshTools } from "./tools.js"
 import { registerSshHooks } from "./hooks.js"
 import { resolveConfig } from "./config/defaults.js"
+import { SSH_NAMESPACE } from "./naming.js"
 
 export default Plugin.define({
   id: "opencode-ssh",
@@ -31,7 +32,22 @@ export default Plugin.define({
       projectDir,
     )
 
+    // ── Register the tool catalog through the SDK v2 tool transform ──
+    //
+    // Registration declares the `ssh` namespace and adds each tool with a
+    // short leaf name plus `options.namespace: "ssh"`. The host derives the
+    // effective tool id by joining namespace and leaf with `_` (dots in
+    // namespaces and provider-unsupported characters normalize to `_`), so
+    // every tool is exposed as `ssh_connect`, `ssh_exec`, `ssh_exec_batch`,
+    // … — valid for every provider and identical to the ids the permission
+    // hook evaluates.
     const toolsRegistration = await ctx.tool.transform((editor) => {
+      editor.namespace({
+        name: SSH_NAMESPACE,
+        description:
+          "Secure SSH access to remote servers: session management, command execution with " +
+          "destructive-command blocking, file transfer, security policy, and audit trail.",
+      })
       for (const definition of tools) editor.add(definition)
     })
 

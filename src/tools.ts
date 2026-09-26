@@ -1,4 +1,5 @@
 import type { ToolContext } from "@opencode/plugin/promise/tool"
+import { SSH_NAMESPACE, type SshToolId, type SshToolLeaf } from "./naming.js"
 import { SshSessionManager } from "./ssh/manager.js"
 import { executeCommand, type ExecResult } from "./ssh/executor.js"
 import { validateCommand, formatValidationResult } from "./security/validator.js"
@@ -80,7 +81,7 @@ export type SshToolDefinition<S extends Record<string, PropSpec>> = {
   name: string
   description: string
   input: SshToolInput
-  options: { permission: string }
+  options: { namespace: string; permission: string }
   execute: (args: ArgsOf<S>, context: ToolContext) => Promise<ToolOutput>
 }
 
@@ -88,6 +89,14 @@ export type SshToolDefinition<S extends Record<string, PropSpec>> = {
  *  heterogeneous array widens it here, at the single catalog boundary. */
 export type SshToolCatalogEntry = Omit<SshToolDefinition<any>, "execute"> & {
   execute: (args: any, context: ToolContext) => Promise<ToolOutput>
+}
+
+/**
+ * Effective tool id the host derives for a namespaced registration
+ * (`namespace "ssh"` + leaf `exec` → `ssh_exec`).
+ */
+export function effectiveToolId(leaf: SshToolLeaf): SshToolId {
+  return `ssh_${leaf}`
 }
 
 function stringArg(description: string): { kind: "string"; description: string; optional: false }
@@ -162,7 +171,10 @@ function defineTool<S extends Record<string, PropSpec>>(
     name: spec.name,
     description: spec.description,
     input: toJsonSchema(spec.shape),
-    options: { permission: spec.permission },
+    // `namespace` places the tool under the `ssh` namespace so the host
+    // exposes it as `ssh_<name>`; `permission` names the exact action the
+    // permission hook evaluates (the effective id).
+    options: { namespace: SSH_NAMESPACE, permission: spec.permission },
     execute: spec.execute,
   }
 }
@@ -179,7 +191,7 @@ interface ConnectInput {
 }
 
 /**
- * Build an ssh.connect connection config, applying defaults from the
+ * Build an ssh_connect connection config, applying defaults from the
  * ~/.ssh/config file (alias → HostName, User, Port, IdentityFile,
  * ProxyJump, ProxyCommand).
  */
@@ -311,7 +323,7 @@ export function createSshTools(
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // ssh.connect — Establish SSH connection
+  // ssh_connect — Establish SSH connection
   // ═══════════════════════════════════════════════════════════════
   const connectShape = {
     host: stringArg("Remote server hostname, IP, or ssh config alias"),
@@ -378,14 +390,14 @@ export function createSshTools(
 
   return [
     defineTool({
-      name: "ssh.connect",
+      name: "connect",
       description:
-        "Establish an SSH connection to a remote server. Returns a session_id for use with other ssh.* tools. " +
+        "Establish an SSH connection to a remote server. Returns a session_id for use with other ssh_* tools. " +
         "Supports password and key-based authentication. Credentials are never stored in logs or output. " +
         "If ssh_config_path is set, host aliases from the ssh config are resolved and their " +
         "User/Port/IdentityFile defaults are applied automatically.",
       shape: connectShape,
-      permission: "ssh.connect",
+      permission: effectiveToolId("connect"),
       async execute(args) {
         // ── Resolve defaults from the ssh config (alias, user, port, identity, proxy) ──
         const { config: resolvedConfig, displayHost, resolvedFrom, sshConfigExists } = resolveHostConfig(args, sshOpts)
@@ -444,13 +456,13 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.disconnect — Close SSH session
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_disconnect — Close SSH session
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.disconnect",
+      name: "disconnect",
       description: "Close an active SSH session and free resources.",
       shape: disconnectShape,
-      permission: "ssh.disconnect",
+      permission: effectiveToolId("disconnect"),
       async execute(args) {
         const closed = await sessionManager.closeSession(args.session_id)
         if (!closed) {
@@ -461,36 +473,36 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.list_sessions — List active SSH sessions (read-only)
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_list_sessions — List active SSH sessions (read-only)
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.list_sessions",
+      name: "list_sessions",
       description: "List all active SSH sessions with their status, host, and uptime.",
       shape: {},
-      permission: "ssh.list_sessions",
+      permission: effectiveToolId("list_sessions"),
       async execute() {
         return { content: formatSessionList(sessionManager.listSessions()) }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.exec — Execute command on remote server
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_exec — Execute command on remote server
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.exec",
+      name: "exec",
       description:
         "Execute a command on a remote server via SSH. " +
         "Destructive commands (rm -rf /, mkfs, etc.) are automatically blocked with no exceptions. " +
         "Risky commands (DROP TABLE, sudo su, systemctl stop, etc.) require your explicit approval every time. " +
         "All output is streamed and displayed in real-time.",
       shape: execShape,
-      permission: "ssh.exec",
+      permission: effectiveToolId("exec"),
       async execute(args) {
         // ── Validate session ──
         const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
           return {
-            content: `❌ Session \`${args.session_id}\` not found. Use ssh.list_sessions to see active sessions.`,
+            content: `❌ Session \`${args.session_id}\` not found. Use ssh_list_sessions to see active sessions.`,
           }
         }
 
@@ -542,7 +554,7 @@ export function createSshTools(
               `**Reason:** ${validation.reason}`,
               "",
               "This command is not in the allowlist for the current security mode.",
-              "Use ssh.security_policy to view the policy.",
+              "Use ssh_security_policy to view the policy.",
             ].join("\n"),
           }
         }
@@ -573,16 +585,16 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.exec_batch — Execute multiple commands in sequence
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_exec_batch — Execute multiple commands in sequence
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.exec_batch",
+      name: "exec_batch",
       description:
         "Execute multiple commands in sequence on a remote server. " +
         "Each command is validated against the security policy. " +
         "If stop_on_error is true, execution stops on the first failed command.",
       shape: execBatchShape,
-      permission: "ssh.exec_batch",
+      permission: effectiveToolId("exec_batch"),
       async execute(args) {
         const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
@@ -682,13 +694,13 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.upload — Upload file via SCP
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_upload — Upload file via SCP
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.upload",
+      name: "upload",
       description: "Upload a local file to the remote server via SCP/SFTP.",
       shape: uploadShape,
-      permission: "ssh.upload",
+      permission: effectiveToolId("upload"),
       async execute(args) {
         const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
@@ -728,13 +740,13 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.download — Download file via SCP
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_download — Download file via SCP
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.download",
+      name: "download",
       description: "Download a file from the remote server to local via SCP/SFTP.",
       shape: downloadShape,
-      permission: "ssh.download",
+      permission: effectiveToolId("download"),
       async execute(args) {
         const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
@@ -773,16 +785,16 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.check_command — Validate command safety (dry-run, read-only)
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_check_command — Validate command safety (dry-run, read-only)
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.check_command",
+      name: "check_command",
       description:
         "Check if a command is safe to execute without actually running it. " +
         "Returns the safety level, any matched blocklist rules, and suggestions. " +
         "Use this to preview command safety before execution.",
       shape: checkCommandShape,
-      permission: "ssh.check_command",
+      permission: effectiveToolId("check_command"),
       async execute(args) {
         const customAllowlist = getEffectiveCustomAllowlist(projectDir, extraAllowlist)
         const validation = validateCommand(args.command, mode, extraBlocklist, customAllowlist)
@@ -791,15 +803,15 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.security_policy — View the current security policy (read-only)
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_security_policy — View the current security policy (read-only)
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.security_policy",
+      name: "security_policy",
       description:
         "View the SSH security policy: the active security mode, the blocklist, and the allowlist. " +
-        "Read-only. Use ssh.security_policy_modify to change any pattern.",
+        "Read-only. Use ssh_security_policy_modify to change any pattern.",
       shape: policyViewShape,
-      permission: "ssh.security_policy",
+      permission: effectiveToolId("security_policy"),
       async execute() {
         const policy = getPolicy(projectDir, mode)
         return { content: formatSecurityPolicy(policy, extraAllowlist) }
@@ -807,20 +819,20 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.security_policy_modify — Add/remove blocklist or allowlist patterns
-    //
-    // Split from ssh.security_policy so the permission it needs is static:
-    // in SDK v2 a tool declares one action, and the permission hook maps
-    // `ssh.security_policy_modify` to "ask" unconditionally.
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_security_policy_modify — Add/remove blocklist or allowlist patterns
+  //
+  // Split from ssh_security_policy so the permission it needs is static:
+  // in SDK v2 a tool declares one action, and the permission hook maps
+  // `ssh_security_policy_modify` to "ask" unconditionally.
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.security_policy_modify",
+      name: "security_policy_modify",
       description:
         "Add or remove a pattern from the SSH security blocklist or allowlist. " +
         "Every change requires explicit user confirmation and is never self-granted. " +
-        "Use ssh.security_policy to inspect the current policy.",
+        "Use ssh_security_policy to inspect the current policy.",
       shape: policyModifyShape,
-      permission: "ssh.security_policy_modify",
+      permission: effectiveToolId("security_policy_modify"),
       async execute(args) {
         // Validate regex
         try {
@@ -879,15 +891,15 @@ export function createSshTools(
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.audit_log — View command audit trail (read-only)
-    // ═══════════════════════════════════════════════════════════════
+  // ssh_audit_log — View command audit trail (read-only)
+  // ═══════════════════════════════════════════════════════════════
     defineTool({
-      name: "ssh.audit_log",
+      name: "audit_log",
       description:
         "View the SSH command audit log. Shows all executed, blocked, and approved commands " +
         "with timestamps, results, and details. Supports filtering by session and command.",
       shape: auditLogShape,
-      permission: "ssh.audit_log",
+      permission: effectiveToolId("audit_log"),
       async execute(args) {
         const entries = readAuditLog(projectDir, {
           limit: args.limit || 20,
@@ -899,7 +911,7 @@ export function createSshTools(
           // Show stats even if no entries match
           const stats = getAuditStats(projectDir)
           if (stats.total === 0) {
-            return { content: "📋 No audit entries yet. Commands executed via ssh.exec will be logged here." }
+            return { content: "📋 No audit entries yet. Commands executed via ssh_exec will be logged here." }
           }
 
           return {

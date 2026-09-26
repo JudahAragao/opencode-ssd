@@ -1,6 +1,6 @@
 {
   "name": "@judaharagao/opencode-ssh",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking and audit",
   "author": "Judah Aragao",
   "license": "MIT",

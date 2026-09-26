@@ -70,7 +70,7 @@ export function validateCommand(
   if (mode === "restricted" || mode === "read_only") {
     const builtinEntries = getAllowedCommands(mode)
     // Custom patterns come from BOTH the plugin config `allowlist` option and
-    // the per-project custom allowlist managed via ssh.security_policy.
+    // the per-project custom allowlist managed via ssh_security_policy.
     const customEntries = createAllowlistEntries(customAllowlist)
     const isAllowed = [...builtinEntries, ...customEntries].some((entry) => entry.pattern.test(trimmed))
 
@@ -81,7 +81,7 @@ export function validateCommand(
         reason: `🔒 NOT ALLOWED in "${mode}" mode. Command not in the allowlist.`,
         suggestions: [
           `Switch to "full" mode to allow all non-blocked commands`,
-          `Add this command pattern to the allowlist via ssh.security_policy (add_allowlist)`,
+          `Add this command pattern to the allowlist via ssh_security_policy (add_allowlist)`,
           `Add this command pattern to the "allowlist" option in your plugin config`,
         ],
       }
