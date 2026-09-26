@@ -3,32 +3,27 @@ import { generateKeyPairSync } from "crypto"
 import { mkdtempSync, writeFileSync } from "fs"
 import { join } from "path"
 import { tmpdir } from "os"
-import { Server, Client } from "ssh2"
+import { Server, Client, utils } from "ssh2"
 import { SshConnection, type SshConnectionConfig } from "../src/ssh/connection.js"
 
 // ── In-process SSH server ──
-const { privateKey: hostPriv, publicKey: _hostPub } = generateKeyPairSync("ed25519")
-const hostKeyPem = hostPriv.export({ type: "pkcs8", format: "pem" }).toString()
+// ssh2's key parser only accepts traditional PKCS#1 PEM ("BEGIN RSA PRIVATE KEY")
+// and OpenSSH-format keys. A PKCS#8 export ("BEGIN PRIVATE KEY") is rejected with
+// "Unsupported key format", for both `hostKeys` and client keys, so use PKCS#1.
+const { privateKey: hostPriv, publicKey: _hostPub } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+const hostKeyPem = hostPriv.export({ type: "pkcs1", format: "pem" }).toString()
 void _hostPub
 
 // Client identity used for key-based auth (temp PEM file + wire pub blob).
-const { privateKey: userPriv, publicKey: userPub } = generateKeyPairSync("ed25519")
-const userKeyPem = userPriv.export({ type: "pkcs8", format: "pem" }).toString()
-const userJwk = userPub.export({ format: "jwk" }) as { x: string }
-const userPubBlob = (() => {
-  const raw = Buffer.from(userJwk.x, "base64url")
-  const algo = Buffer.from("ssh-ed25519")
-  const len = (b: Buffer) => {
-    const l = Buffer.alloc(4)
-    l.writeUInt32BE(b.length, 0)
-    return l
-  }
-  return Buffer.concat([len(algo), algo, len(raw), raw])
-})()
+const { privateKey: userPriv } = generateKeyPairSync("rsa", { modulusLength: 2048 })
+const userKeyPem = userPriv.export({ type: "pkcs1", format: "pem" }).toString()
+// Derive the expected public-key blob with ssh2's own parser rather than
+// hand-encoding the wire format.
+const userPubBlob = (utils.parseKey(userKeyPem) as { getPublicSSH(): Buffer }).getPublicSSH()
 
 const keyFile = (() => {
   const dir = mkdtempSync(join(tmpdir(), "it-key-"))
-  const f = join(dir, "id_ed25519")
+  const f = join(dir, "id_rsa")
   writeFileSync(f, userKeyPem)
   return f
 })()
@@ -45,7 +40,7 @@ function startServer(): Promise<TestServer> {
         .on("authentication", (ctx) => {
           if (ctx.method === "password" && ctx.username === "testuser" && ctx.password === "secret") {
             ctx.accept()
-          } else if (ctx.method === "publickey" && ctx.key.algo === "ssh-ed25519" && ctx.key.data.equals(userPubBlob)) {
+          } else if (ctx.method === "publickey" && ctx.key.algo === "ssh-rsa" && ctx.key.data.equals(userPubBlob)) {
             ctx.accept()
           } else {
             ctx.reject(["password", "publickey"])
@@ -89,15 +84,13 @@ function startServer(): Promise<TestServer> {
   })
 }
 
-let server: TestServer
-try {
-  server = await startServer()
-} catch {
-  server = { port: 0, close: async () => {} } as TestServer
-}
+// If the server cannot start these tests must fail loudly. Silently
+// degrading to `port: 0` used to make every test in this file a no-op that
+// reported success without ever opening a connection.
+const server: TestServer = await startServer()
 
 afterAll(async () => {
-  if (server.port) await server.close()
+  await server.close()
 })
 
 function connConfig(overrides: Partial<SshConnectionConfig> = {}): SshConnectionConfig {
@@ -114,7 +107,6 @@ function connConfig(overrides: Partial<SshConnectionConfig> = {}): SshConnection
 
 describe("SSH integration (in-process server)", () => {
   test("connects with password and execs a command", async () => {
-    if (!server.port) return
     const conn = new SshConnection("it-001", connConfig())
     await conn.connect()
     expect(conn.connected).toBe(true)
@@ -128,7 +120,6 @@ describe("SSH integration (in-process server)", () => {
   })
 
   test("clears the password from memory after a successful connect", async () => {
-    if (!server.port) return
     const conn = new SshConnection("it-002", connConfig())
     await conn.connect()
     expect((conn.config as any).password).toBeUndefined()
@@ -136,7 +127,6 @@ describe("SSH integration (in-process server)", () => {
   })
 
   test("captures the real host key and validates it via strict_host_key", async () => {
-    if (!server.port) return
 
     // 1) Capture the wire-format host key the server actually sends.
     const captured: Buffer[] = []
@@ -175,7 +165,6 @@ describe("SSH integration (in-process server)", () => {
   })
 
   test("strict_host_key REJECTS a changed host key (MITM protection)", async () => {
-    if (!server.port) return
 
     const dir = mkdtempSync(join(tmpdir(), "it-kh-"))
     const kh = join(dir, "known_hosts")
@@ -189,7 +178,6 @@ describe("SSH integration (in-process server)", () => {
   })
 
   test("auto-reconnects a dropped key session before running a command", async () => {
-    if (!server.port) return
     const conn = new SshConnection(
       "it-005",
       connConfig({ authMethod: "key", keyPath: keyFile, password: undefined }),
@@ -209,7 +197,6 @@ describe("SSH integration (in-process server)", () => {
   })
 
   test("propagates a non-zero exit code", async () => {
-    if (!server.port) return
     const conn = new SshConnection("it-006", connConfig())
     await conn.connect()
     const result = await conn.exec("fail")
