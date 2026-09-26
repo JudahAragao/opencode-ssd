@@ -20,11 +20,13 @@ SSH access plugin for OpenCode — secure remote command execution with command 
 
 ## Installation
 
+Requires **OpenCode v2** and `@opencode/plugin` `^2.0.18`.
+
 Add to your `opencode.json`:
 
 ```json
 {
-  "plugin": ["@judaharagao/opencode-ssh"]
+  "plugins": ["@judaharagao/opencode-ssh"]
 }
 ```
 
@@ -32,16 +34,23 @@ Or with configuration:
 
 ```json
 {
-  "plugin": [
-    ["@judaharagao/opencode-ssh", {
-      "mode": "full",
-      "max_sessions": 5,
-      "default_timeout": 30,
-      "audit_enabled": true
-    }]
+  "plugins": [
+    {
+      "package": "@judaharagao/opencode-ssh",
+      "options": {
+        "mode": "full",
+        "max_sessions": 5,
+        "default_timeout": 30,
+        "audit_enabled": true
+      }
+    }
   ]
 }
 ```
+
+> **Migrating from v1 of this plugin?** The v2 major version changes the
+> entrypoint shape and the permission model. See
+> [Migrating to v2.0.0](#migrating-to-v200).
 
 ## Configuration Options
 
@@ -59,31 +68,6 @@ Or with configuration:
 | `strict_host_key` | boolean | `false` | Reject connections whose host key is not an exact match in `~/.ssh/known_hosts` (MITM protection) |
 | `rate_limit_per_minute` | number | `120` | Max commands allowed per host per minute |
 | `cooldown_seconds` | number | `0` | Minimum delay (seconds) between commands on the same host |
-
-### OpenAI-compatible tool-name mode
-
-Strict OpenAI-compatible providers, including some NVIDIA NIM deployments,
-reject dots in tool names. By default this plugin keeps names such as
-`ssh.connect` and `ssh.exec`. To expose provider-safe names such as
-`ssh_connect` and `ssh_exec`, enable the shared compatibility mode before
-starting OpenCode:
-
-```bash
-OPENCODE_SAFE_TOOL_NAMES=1 opencode
-```
-
-When `opencode-telos` is installed, the mode can also be persisted with:
-
-```text
-/sdd tool-names safe
-/sdd tool-names canonical
-/sdd tool-names status
-```
-
-Restart OpenCode after changing the mode because the tool catalog is registered
-during startup. The persisted setting is `.opencode/tool-names.json` and is
-shared by both plugins. Hooks and security policies continue to use the
-canonical `ssh.*` names internally.
 
 ## SSH Config Integration
 
@@ -134,10 +118,10 @@ Restricted and read-only modes respect allowlist patterns from **both** sources 
    }]
    ```
 
-2. **Per-project policy** — at runtime via `ssh.security_policy`:
+2. **Per-project policy** — at runtime via `ssh.security_policy_modify`:
 
    ```
-   ssh.security_policy(action="add_allowlist", pattern="docker stop .*")
+   ssh.security_policy_modify(action="add_allowlist", pattern="docker stop .*")
    ```
 
    Patterns persist in `<project>/.opencode-ssh/policy.json` and are merged with the config patterns on every execution. Either source alone is enough to permit a matching command in restricted/read_only mode. The destructive blocklist always wins over any allowlist entry.
@@ -201,20 +185,28 @@ ssh.check_command(command="rm -rf /tmp/cache")
 ```
 
 ### `ssh.security_policy`
-View or modify the security policy.
+View the active security policy (read-only).
 
 ```
-ssh.security_policy(action="view")
-ssh.security_policy(action="add_blocklist", pattern="custom-dangerous-.*")
-ssh.security_policy(action="add_allowlist", pattern="docker stop .*")
-ssh.security_policy(action="remove_allowlist", pattern="docker stop .*")
+ssh.security_policy()
 ```
 
-> **User confirmation required:** Viewing the policy is read-only and does not
-> prompt. Every **mutation** (`add_allowlist`, `remove_allowlist`,
-> `add_blocklist`, `remove_blocklist`) triggers opencode's permission prompt
-> and is re-confirmed by the user **every single time** — the LLM can never
-> self-grant an allowlist entry without explicit user approval.
+### `ssh.security_policy_modify`
+Modify the security policy at runtime.
+
+```
+ssh.security_policy_modify(action="add_blocklist", pattern="custom-dangerous-.*")
+ssh.security_policy_modify(action="remove_blocklist", pattern="custom-dangerous-.*")
+ssh.security_policy_modify(action="add_allowlist", pattern="docker stop .*")
+ssh.security_policy_modify(action="remove_allowlist", pattern="docker stop .*")
+```
+
+> **User confirmation required:** `ssh.security_policy` is read-only and does
+> not prompt. Every call to `ssh.security_policy_modify` triggers opencode's
+> permission prompt and is re-confirmed by the user **every single time** — the
+> LLM can never self-grant an allowlist entry without explicit user approval.
+> That is why policy mutation lives in its own tool rather than being an
+> `action` on the read tool.
 
 ### `ssh.audit_log`
 View the command audit trail.
@@ -223,6 +215,48 @@ View the command audit trail.
 ssh.audit_log(limit=20)
 ssh.audit_log(session_id="prod-server", command_filter="docker")
 ```
+
+## Migrating to v2.0.0
+
+v2.0.0 migrates the plugin to the OpenCode v2 plugin SDK (`@opencode/plugin`).
+Three things changed that affect existing setups.
+
+### 1. Entry point and configuration
+
+The v1 SDK exported a `server` function and took its config from the second
+element of a tuple in the `plugin` array. v2 uses `Plugin.define({ setup })`
+and the `plugins` array with an object.
+
+```diff
+- { "plugin": [["@judaharagao/opencode-ssh", { "mode": "full" }]] }
++ { "plugins": [{ "package": "@judaharagao/opencode-ssh", "options": { "mode": "full" } }] }
+```
+
+The `./server` export was removed, and the peer dependency is now
+`@opencode/plugin@^2.0.18`.
+
+### 2. Tool names are canonical only
+
+The OpenAI-compatible `tool-names` mode (`OPENCODE_SAFE_TOOL_NAMES`,
+`/sdd tool-names`, `.opencode/tool-names.json`) has been **removed** from this
+plugin. Tools are always registered with their canonical dotted names
+(`ssh.connect`, `ssh.exec`, …) and there is no underscored projection.
+
+If you still need provider-safe names, that capability now lives in
+`opencode-telos`, not here.
+
+### 3. `ssh.security_policy` is split in two
+
+`ssh.security_policy` no longer takes an `action`. Reading the policy and
+mutating it are separate tools:
+
+| Operation | v1 | v2 |
+|---|---|---|
+| View policy | `ssh.security_policy(action="view")` | `ssh.security_policy()` |
+| Mutate policy | `ssh.security_policy(action="add_allowlist", pattern=…)` | `ssh.security_policy_modify(action="add_allowlist", pattern=…)` |
+
+The same `action` values are otherwise unchanged, and persisted patterns still
+live in `<project>/.opencode-ssh/policy.json`.
 
 ## Security
 

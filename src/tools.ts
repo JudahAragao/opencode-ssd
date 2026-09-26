@@ -1,4 +1,4 @@
-import { tool, type ToolDefinition } from "@opencode-ai/plugin"
+import type { ToolContext } from "@opencode/plugin/promise/tool"
 import { SshSessionManager } from "./ssh/manager.js"
 import { executeCommand, type ExecResult } from "./ssh/executor.js"
 import { validateCommand, formatValidationResult } from "./security/validator.js"
@@ -9,7 +9,6 @@ import {
   removeBlocklistPattern,
   addAllowlistPattern,
   removeAllowlistPattern,
-  formatPolicy,
 } from "./security/policy.js"
 import { readAuditLog, formatAuditLog, getAuditStats } from "./ssh/audit.js"
 import { sanitizeHost, sanitizeUsername, sanitizePath } from "./ssh/sanitizer.js"
@@ -32,6 +31,141 @@ import {
 } from "./display/formatter.js"
 import type { SecurityMode } from "./config/schema.js"
 import type { SshConnectionConfig } from "./ssh/connection.js"
+
+// ═══════════════════════════════════════════════════════════════════
+// Tool definition helpers
+//
+// SDK v2 tools declare a JSON Schema `input` instead of the v1 Zod args
+// map, and return a `Tool.Result` instead of a bare string. The specs
+// below describe flat argument shapes; the mapping to JSON Schema and to
+// a statically typed `args` object happens in one place so every tool
+// body keeps the exact same shape as before.
+// ═══════════════════════════════════════════════════════════════════
+
+export type ToolOutput = { content: string }
+
+type PropSpec = { description: string } & (
+  | { kind: "string"; optional: false }
+  | { kind: "string"; optional: true }
+  | { kind: "number"; optional: false }
+  | { kind: "number"; optional: true }
+  | { kind: "boolean"; optional: false }
+  | { kind: "boolean"; optional: true }
+  | { kind: "enum"; values: readonly string[]; optional: false }
+  | { kind: "enum"; values: readonly string[]; optional: true }
+)
+
+type PropValue<P extends PropSpec> = P extends { kind: "number" }
+  ? number
+  : P extends { kind: "boolean" }
+    ? boolean
+    : P extends { kind: "enum"; values: infer V extends readonly string[] }
+      ? V[number]
+      : string
+
+type ArgsOf<S extends Record<string, PropSpec>> = {
+  [K in keyof S as S[K]["optional"] extends true ? never : K]: PropValue<S[K]>
+} & {
+  [K in keyof S as S[K]["optional"] extends true ? K : never]?: PropValue<S[K]>
+}
+
+export type SshToolInput = {
+  type: "object"
+  properties: Record<string, { type: string; enum?: string[]; description?: string }>
+  required?: string[]
+  additionalProperties: false
+}
+
+export type SshToolDefinition<S extends Record<string, PropSpec>> = {
+  name: string
+  description: string
+  input: SshToolInput
+  options: { permission: string }
+  execute: (args: ArgsOf<S>, context: ToolContext) => Promise<ToolOutput>
+}
+
+/** Catalog element type. Each tool keeps its own argument typing; the
+ *  heterogeneous array widens it here, at the single catalog boundary. */
+export type SshToolCatalogEntry = Omit<SshToolDefinition<any>, "execute"> & {
+  execute: (args: any, context: ToolContext) => Promise<ToolOutput>
+}
+
+function stringArg(description: string): { kind: "string"; description: string; optional: false }
+function stringArg(description: string, optional: true): { kind: "string"; description: string; optional: true }
+function stringArg(description: string, optional: boolean): { kind: "string"; description: string; optional: boolean }
+function stringArg(description: string, optional = false) {
+  return { kind: "string", description, optional }
+}
+
+function numberArg(description: string): { kind: "number"; description: string; optional: false }
+function numberArg(description: string, optional: true): { kind: "number"; description: string; optional: true }
+function numberArg(description: string, optional: boolean): { kind: "number"; description: string; optional: boolean }
+function numberArg(description: string, optional = false) {
+  return { kind: "number", description, optional }
+}
+
+function booleanArg(description: string): { kind: "boolean"; description: string; optional: false }
+function booleanArg(description: string, optional: true): { kind: "boolean"; description: string; optional: true }
+function booleanArg(description: string, optional: boolean): { kind: "boolean"; description: string; optional: boolean }
+function booleanArg(description: string, optional = false) {
+  return { kind: "boolean", description, optional }
+}
+
+function enumArg<const V extends readonly string[]>(
+  values: V,
+  description: string,
+): { kind: "enum"; values: V; description: string; optional: false }
+function enumArg<const V extends readonly string[]>(
+  values: V,
+  description: string,
+  optional: true,
+): { kind: "enum"; values: V; description: string; optional: true }
+function enumArg<const V extends readonly string[]>(
+  values: V,
+  description: string,
+  optional = false,
+) {
+  return { kind: "enum", values, description, optional }
+}
+
+function toJsonSchema<S extends Record<string, PropSpec>>(shape: S): SshToolInput {
+  const properties: SshToolInput["properties"] = {}
+  const required: string[] = []
+  for (const [name, spec] of Object.entries(shape)) {
+    const property =
+      spec.kind === "enum"
+        ? { type: "string", enum: [...spec.values], description: spec.description }
+        : { type: spec.kind, description: spec.description }
+    properties[name] = property
+    if (!spec.optional) required.push(name)
+  }
+  return {
+    type: "object",
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+    additionalProperties: false,
+  }
+}
+
+type ToolSpec<S extends Record<string, PropSpec>> = {
+  name: string
+  description: string
+  shape: S
+  permission: string
+  execute: (args: ArgsOf<S>, context: ToolContext) => Promise<ToolOutput>
+}
+
+function defineTool<S extends Record<string, PropSpec>>(
+  spec: ToolSpec<S>,
+): SshToolDefinition<S> {
+  return {
+    name: spec.name,
+    description: spec.description,
+    input: toJsonSchema(spec.shape),
+    options: { permission: spec.permission },
+    execute: spec.execute,
+  }
+}
 
 interface ConnectInput {
   host: string
@@ -140,6 +274,11 @@ async function startAutoConnect(
 
 /**
  * Create all SSH tools for the plugin.
+ *
+ * Every tool declares the permission it needs in `options.permission`; the
+ * decision to allow, ask, or deny is owned by the permission hook in
+ * hooks.ts. `projectDir` is the plugin instance location and replaces the
+ * v1 per-call `ctx.directory`.
  */
 export function createSshTools(
   mode: SecurityMode = "full",
@@ -150,7 +289,8 @@ export function createSshTools(
   sshConfigPath?: string,
   autoConnect: boolean = false,
   opts: { strictHostKey?: boolean; knownHostsPath?: string; rateLimitPerMinute?: number; cooldownSeconds?: number; autoReconnect?: boolean } = {},
-): Record<string, ToolDefinition> {
+  projectDir: string = "",
+): SshToolCatalogEntry[] {
   const sessionManager = new SshSessionManager({ maxSessions })
   const rateLimiter = new RateLimiter({
     maxPerMinute: opts.rateLimitPerMinute ?? 120,
@@ -169,76 +309,109 @@ export function createSshTools(
     // prevent the plugin from loading.
     void startAutoConnect(sessionManager, sshConfigPath)
   }
-  return {
-    // ═══════════════════════════════════════════════════════════════
-    // ssh.connect — Establish SSH connection
-    // ═══════════════════════════════════════════════════════════════
-    "ssh.connect": tool({
+
+  // ═══════════════════════════════════════════════════════════════
+  // ssh.connect — Establish SSH connection
+  // ═══════════════════════════════════════════════════════════════
+  const connectShape = {
+    host: stringArg("Remote server hostname, IP, or ssh config alias"),
+    port: numberArg("SSH port (default: 22, or port from ssh config)", true),
+    username: stringArg("SSH username (default: from ssh config)", true),
+    auth_method: enumArg(["password", "key"], "Authentication method (default: key if an identity file is configured, else password)", true),
+    password: stringArg("Password (only for password auth)", true),
+    key_path: stringArg("Path to private key file (default: identity file from ssh config, else ~/.ssh/id_rsa)", true),
+    passphrase: stringArg("Passphrase for the private key", true),
+    alias: stringArg("Friendly name for this session", true),
+  }
+
+  const disconnectShape = {
+    session_id: stringArg("Session ID or alias to disconnect"),
+  }
+
+  const execShape = {
+    session_id: stringArg("Session ID or alias"),
+    command: stringArg("Command to execute on the remote server"),
+    cwd: stringArg("Working directory for the command", true),
+    timeout: numberArg("Timeout in seconds (default: 30)", true),
+    sudo: booleanArg("Run command with sudo", true),
+  }
+
+  const execBatchShape = {
+    session_id: stringArg("Session ID or alias"),
+    commands: stringArg("Commands separated by newlines"),
+    stop_on_error: booleanArg("Stop if a command fails (default: true)", true),
+    cwd: stringArg("Working directory", true),
+    timeout: numberArg("Timeout per command in seconds", true),
+  }
+
+  const uploadShape = {
+    session_id: stringArg("Session ID or alias"),
+    local_path: stringArg("Local file path"),
+    remote_path: stringArg("Remote destination path"),
+  }
+
+  const downloadShape = {
+    session_id: stringArg("Session ID or alias"),
+    remote_path: stringArg("Remote file path"),
+    local_path: stringArg("Local destination path"),
+  }
+
+  const checkCommandShape = {
+    command: stringArg("Command to validate"),
+  }
+
+  const policyViewShape = {}
+
+  const policyModifyShape = {
+    action: enumArg(
+      ["add_blocklist", "remove_blocklist", "add_allowlist", "remove_allowlist"],
+      "Policy change to perform",
+    ),
+    pattern: stringArg("Regex pattern to add/remove"),
+  }
+
+  const auditLogShape = {
+    limit: numberArg("Maximum entries to show (default: 20)", true),
+    session_id: stringArg("Filter by session ID", true),
+    command_filter: stringArg("Filter by command text", true),
+  }
+
+  return [
+    defineTool({
+      name: "ssh.connect",
       description:
         "Establish an SSH connection to a remote server. Returns a session_id for use with other ssh.* tools. " +
         "Supports password and key-based authentication. Credentials are never stored in logs or output. " +
         "If ssh_config_path is set, host aliases from the ssh config are resolved and their " +
         "User/Port/IdentityFile defaults are applied automatically.",
-      args: {
-        host: tool.schema.string().describe("Remote server hostname, IP, or ssh config alias"),
-        port: tool.schema.number().optional().describe("SSH port (default: 22, or port from ssh config)"),
-        username: tool.schema.string().optional().describe("SSH username (default: from ssh config)"),
-        auth_method: tool.schema.enum(["password", "key"]).optional().describe("Authentication method (default: key if an identity file is configured, else password)"),
-        password: tool.schema.string().optional().describe("Password (only for password auth)"),
-        key_path: tool.schema.string().optional().describe("Path to private key file (default: identity file from ssh config, else ~/.ssh/id_rsa)"),
-        passphrase: tool.schema.string().optional().describe("Passphrase for the private key"),
-        alias: tool.schema.string().optional().describe("Friendly name for this session"),
-      },
-      async execute(args, ctx) {
+      shape: connectShape,
+      permission: "ssh.connect",
+      async execute(args) {
         // ── Resolve defaults from the ssh config (alias, user, port, identity, proxy) ──
         const { config: resolvedConfig, displayHost, resolvedFrom, sshConfigExists } = resolveHostConfig(args, sshOpts)
 
         // ── Input validation ──
         const hostCheck = sanitizeHost(displayHost)
         if (!hostCheck.clean) {
-          return `❌ Invalid host: ${hostCheck.reason}`
+          return { content: `❌ Invalid host: ${hostCheck.reason}` }
         }
 
         if (resolvedConfig.username) {
           const userCheck = sanitizeUsername(resolvedConfig.username)
           if (!userCheck.clean) {
-            return `❌ Invalid username: ${userCheck.reason}`
+            return { content: `❌ Invalid username: ${userCheck.reason}` }
           }
         } else {
-          return "❌ A username is required. Provide one or add a User directive in your ssh config."
+          return { content: "❌ A username is required. Provide one or add a User directive in your ssh config." }
         }
 
         const displayPort = args.port || resolvedConfig.port || 22
 
-        // ── Ask for permission ──
-        await ctx.ask({
-          permission: "ssh.connect",
-          patterns: [`${resolvedConfig.username}@${displayHost}:${displayPort}`],
-          always: [`${resolvedConfig.username}@${displayHost}:${displayPort}`],
-          metadata: {
-            host: displayHost,
-            resolved_host: resolvedConfig.host !== displayHost ? resolvedConfig.host : undefined,
-            port: displayPort,
-            username: resolvedConfig.username,
-            auth_method: resolvedConfig.authMethod,
-            alias: args.alias,
-            ssh_config: resolvedFrom || undefined,
-          },
-        })
-
         // ── Connect ──
-        const manager = sessionManager
-
         try {
-          const sessionId = await manager.createSession(resolvedConfig)
+          const sessionId = await sessionManager.createSession(resolvedConfig)
           const lines = [
-            formatConnectResult(
-              sessionId,
-              displayHost,
-              displayPort,
-              resolvedConfig.username!,
-              args.alias,
-            ),
+            formatConnectResult(sessionId, displayHost, displayPort, resolvedConfig.username!, args.alias),
           ]
           if (resolvedConfig.host !== displayHost) {
             lines.push(`> Resolved via ssh config: ${displayHost} → ${resolvedConfig.host}`)
@@ -249,21 +422,23 @@ export function createSshTools(
           if (resolvedConfig.proxy) {
             lines.push(`> 🛤️ Connecting through proxy (${resolvedConfig.proxy.jumps?.length ?? 0} hop(s))`)
           }
-          return lines.join("\n")
+          return { content: lines.join("\n") }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
-          return [
-            `## ❌ SSH Connection Failed`,
-            "",
-            `**Host:** ${resolvedConfig.username}@${displayHost}:${displayPort}`,
-            `**Error:** ${msg}`,
-            "",
-            "Troubleshooting:",
-            "- Verify the host is reachable",
-            "- Check that the username is correct",
-            "- Ensure SSH is running on the remote host",
-            "- Verify your credentials or key file",
-          ].join("\n")
+          return {
+            content: [
+              `## ❌ SSH Connection Failed`,
+              "",
+              `**Host:** ${resolvedConfig.username}@${displayHost}:${displayPort}`,
+              `**Error:** ${msg}`,
+              "",
+              "Troubleshooting:",
+              "- Verify the host is reachable",
+              "- Check that the username is correct",
+              "- Ensure SSH is running on the remote host",
+              "- Verify your credentials or key file",
+            ].join("\n"),
+          }
         }
       },
     }),
@@ -271,142 +446,105 @@ export function createSshTools(
     // ═══════════════════════════════════════════════════════════════
     // ssh.disconnect — Close SSH session
     // ═══════════════════════════════════════════════════════════════
-    "ssh.disconnect": tool({
+    defineTool({
+      name: "ssh.disconnect",
       description: "Close an active SSH session and free resources.",
-      args: {
-        session_id: tool.schema.string().describe("Session ID or alias to disconnect"),
-      },
-      async execute(args, ctx) {
-        await ctx.ask({
-          permission: "ssh.disconnect",
-          patterns: [args.session_id],
-          always: [],
-          metadata: { session_id: args.session_id },
-        })
-
-        const manager = sessionManager
-        const closed = await manager.closeSession(args.session_id)
-
+      shape: disconnectShape,
+      permission: "ssh.disconnect",
+      async execute(args) {
+        const closed = await sessionManager.closeSession(args.session_id)
         if (!closed) {
-          return `Session \`${args.session_id}\` not found or already closed.`
+          return { content: `Session \`${args.session_id}\` not found or already closed.` }
         }
-
-        return formatDisconnectResult(args.session_id)
+        return { content: formatDisconnectResult(args.session_id) }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.list_sessions — List active SSH sessions
+    // ssh.list_sessions — List active SSH sessions (read-only)
     // ═══════════════════════════════════════════════════════════════
-    "ssh.list_sessions": tool({
+    defineTool({
+      name: "ssh.list_sessions",
       description: "List all active SSH sessions with their status, host, and uptime.",
-      args: {},
-      async execute(_args, _ctx) {
-        const manager = sessionManager
-        const sessions = manager.listSessions()
-        return formatSessionList(sessions)
+      shape: {},
+      permission: "ssh.list_sessions",
+      async execute() {
+        return { content: formatSessionList(sessionManager.listSessions()) }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
     // ssh.exec — Execute command on remote server
     // ═══════════════════════════════════════════════════════════════
-    "ssh.exec": tool({
+    defineTool({
+      name: "ssh.exec",
       description:
         "Execute a command on a remote server via SSH. " +
         "Destructive commands (rm -rf /, mkfs, etc.) are automatically blocked with no exceptions. " +
         "Risky commands (DROP TABLE, sudo su, systemctl stop, etc.) require your explicit approval every time. " +
         "All output is streamed and displayed in real-time.",
-      args: {
-        session_id: tool.schema.string().describe("Session ID or alias"),
-        command: tool.schema.string().describe("Command to execute on the remote server"),
-        cwd: tool.schema.string().optional().describe("Working directory for the command"),
-        timeout: tool.schema.number().optional().describe("Timeout in seconds (default: 30)"),
-        sudo: tool.schema.boolean().optional().describe("Run command with sudo"),
-      },
-      async execute(args, ctx) {
+      shape: execShape,
+      permission: "ssh.exec",
+      async execute(args) {
         // ── Validate session ──
-        const manager = sessionManager
-        const connection = manager.getSession(args.session_id)
+        const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
-          return `❌ Session \`${args.session_id}\` not found. Use ssh.list_sessions to see active sessions.`
+          return {
+            content: `❌ Session \`${args.session_id}\` not found. Use ssh.list_sessions to see active sessions.`,
+          }
         }
 
         // ── Rate limit per host ──
         const hostKey = connection.config.alias || connection.config.host
         const rateCheck = rateLimiter.check(hostKey)
         if (!rateCheck.allowed) {
-          return [
-            `## ⏳ Command Rate Limited`,
-            "",
-            `**Host:** \`${hostKey}\``,
-            `**Reason:** ${rateCheck.reason}`,
-            rateCheck.retryAfterSeconds ? `**Retry after:** ~${rateCheck.retryAfterSeconds}s` : "",
-          ]
-            .filter(Boolean)
-            .join("\n")
+          return {
+            content: [
+              `## ⏳ Command Rate Limited`,
+              "",
+              `**Host:** \`${hostKey}\``,
+              `**Reason:** ${rateCheck.reason}`,
+              rateCheck.retryAfterSeconds ? `**Retry after:** ~${rateCheck.retryAfterSeconds}s` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          }
         }
 
-        // ── Validate command against blocklist BEFORE asking for permission ──
+        // ── Validate command against blocklist BEFORE any permission prompt ──
         // Custom allowlist = plugin config `allowlist` + per-project policy patterns.
-        const customAllowlist = getEffectiveCustomAllowlist(ctx.directory, extraAllowlist)
+        const customAllowlist = getEffectiveCustomAllowlist(projectDir, extraAllowlist)
         const validation = validateCommand(args.command, mode, extraBlocklist, customAllowlist)
 
         // DESTRUCTIVE: 100% blocked, no permission prompt, no override
         if (validation.level === "destructive") {
-          return [
-            "## 🚫 Command Blocked (Destructive)",
-            "",
-            `**Command:** \`${args.command}\``,
-            `**Reason:** ${validation.reason}`,
-            `**Rule:** ${validation.matched_rule}`,
-            "",
-            "This command is **permanently blocked** for safety.",
-            "Destructive commands cannot be executed under any circumstances.",
-          ].join("\n")
+          return {
+            content: [
+              "## 🚫 Command Blocked (Destructive)",
+              "",
+              `**Command:** \`${args.command}\``,
+              `**Reason:** ${validation.reason}`,
+              `**Rule:** ${validation.matched_rule}`,
+              "",
+              "This command is **permanently blocked** for safety.",
+              "Destructive commands cannot be executed under any circumstances.",
+            ].join("\n"),
+          }
         }
 
         // NOT IN ALLOWLIST: blocked in restricted/read_only mode
         if (validation.level === "not_in_allowlist") {
-          return [
-            "## 🔒 Command Not Allowed",
-            "",
-            `**Command:** \`${args.command}\``,
-            `**Reason:** ${validation.reason}`,
-            "",
-            "This command is not in the allowlist for the current security mode.",
-            "Use ssh.security_policy to view or modify the policy.",
-          ].join("\n")
-        }
-
-        // RISKY: Ask for permission EVERY TIME (no "always" pattern)
-        if (validation.level === "risky") {
-          await ctx.ask({
-            permission: "ssh.exec.risky",
-            patterns: [args.command],
-            always: [], // Empty = ask EVERY time
-            metadata: {
-              session_id: args.session_id,
-              command: args.command,
-              host: connection.config.host,
-              username: connection.config.username,
-              reason: validation.reason,
-              rule: validation.matched_rule,
-            },
-          })
-        } else {
-          // Safe command: ask once with "always" pattern
-          await ctx.ask({
-            permission: "ssh.exec",
-            patterns: [args.command],
-            always: [args.command],
-            metadata: {
-              session_id: args.session_id,
-              command: args.command,
-              host: connection.config.host,
-              username: connection.config.username,
-            },
-          })
+          return {
+            content: [
+              "## 🔒 Command Not Allowed",
+              "",
+              `**Command:** \`${args.command}\``,
+              `**Reason:** ${validation.reason}`,
+              "",
+              "This command is not in the allowlist for the current security mode.",
+              "Use ssh.security_policy to view the policy.",
+            ].join("\n"),
+          }
         }
 
         // ── Execute ──
@@ -423,61 +561,58 @@ export function createSshTools(
               timeout: args.timeout || defaultTimeout,
               sudo: args.sudo,
             },
-            ctx.directory,
+            projectDir,
             customAllowlist,
           )
         } finally {
           rateLimiter.record(hostKey, true)
         }
 
-        return formatExecResult(result)
+        return { content: formatExecResult(result) }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
     // ssh.exec_batch — Execute multiple commands in sequence
     // ═══════════════════════════════════════════════════════════════
-    "ssh.exec_batch": tool({
+    defineTool({
+      name: "ssh.exec_batch",
       description:
         "Execute multiple commands in sequence on a remote server. " +
         "Each command is validated against the security policy. " +
         "If stop_on_error is true, execution stops on the first failed command.",
-      args: {
-        session_id: tool.schema.string().describe("Session ID or alias"),
-        commands: tool.schema.string().describe("Commands separated by newlines"),
-        stop_on_error: tool.schema.boolean().optional().describe("Stop if a command fails (default: true)"),
-        cwd: tool.schema.string().optional().describe("Working directory"),
-        timeout: tool.schema.number().optional().describe("Timeout per command in seconds"),
-      },
-      async execute(args, ctx) {
-        const manager = sessionManager
-        const connection = manager.getSession(args.session_id)
+      shape: execBatchShape,
+      permission: "ssh.exec_batch",
+      async execute(args) {
+        const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
-          return `❌ Session \`${args.session_id}\` not found.`
+          return { content: `❌ Session \`${args.session_id}\` not found.` }
         }
 
         // ── Rate limit per host ──
         const batchHostKey = connection.config.alias || connection.config.host
         const batchRateCheck = rateLimiter.check(batchHostKey)
         if (!batchRateCheck.allowed) {
-          return [
-            `## ⏳ Batch Rate Limited`,
-            "",
-            `**Host:** \`${batchHostKey}\``,
-            `**Reason:** ${batchRateCheck.reason}`,
-            batchRateCheck.retryAfterSeconds ? `**Retry after:** ~${batchRateCheck.retryAfterSeconds}s` : "",
-          ]
-            .filter(Boolean)
-            .join("\n")
+          return {
+            content: [
+              `## ⏳ Batch Rate Limited`,
+              "",
+              `**Host:** \`${batchHostKey}\``,
+              `**Reason:** ${batchRateCheck.reason}`,
+              batchRateCheck.retryAfterSeconds ? `**Retry after:** ~${batchRateCheck.retryAfterSeconds}s` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+          }
         }
 
         const commands = args.commands.split("\n").filter((c) => c.trim())
         if (commands.length === 0) {
-          return "No commands to execute."
+          return { content: "No commands to execute." }
         }
 
         // ── Validate all commands first ──
-        const customAllowlist = getEffectiveCustomAllowlist(ctx.directory, extraAllowlist)
+        const customAllowlist = getEffectiveCustomAllowlist(projectDir, extraAllowlist)
         const validations: Array<{ command: string; validation: ReturnType<typeof validateCommand> }> = []
         for (const cmd of commands) {
           const v = validateCommand(cmd.trim(), mode, extraBlocklist, customAllowlist)
@@ -493,38 +628,7 @@ export function createSshTools(
           }
           lines.push("")
           lines.push("Destructive commands cannot be executed. Remove them and try again.")
-          return lines.join("\n")
-        }
-
-        // Check for risky commands and ask permission
-        const risky = validations.filter((v) => v.validation.level === "risky")
-        if (risky.length > 0) {
-          await ctx.ask({
-            permission: "ssh.exec_batch.risky",
-            patterns: risky.map((r) => r.command),
-            always: [], // Ask EVERY time for risky batch commands
-            metadata: {
-              session_id: args.session_id,
-              commands: risky.map((r) => ({
-                command: r.command,
-                reason: r.validation.reason,
-                rule: r.validation.matched_rule,
-              })),
-              host: connection.config.host,
-            },
-          })
-        } else {
-          // Safe batch
-          await ctx.ask({
-            permission: "ssh.exec_batch",
-            patterns: commands.map((c) => c.trim()),
-            always: [],
-            metadata: {
-              session_id: args.session_id,
-              command_count: commands.length,
-              host: connection.config.host,
-            },
-          })
+          return { content: lines.join("\n") }
         }
 
         // ── Execute commands sequentially ──
@@ -544,7 +648,7 @@ export function createSshTools(
                 cwd: args.cwd,
                 timeout: args.timeout || defaultTimeout,
               },
-              ctx.directory,
+              projectDir,
               customAllowlist,
             )
           } finally {
@@ -573,45 +677,30 @@ export function createSshTools(
           lines.push("")
         }
 
-        return lines.join("\n")
+        return { content: lines.join("\n") }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
     // ssh.upload — Upload file via SCP
     // ═══════════════════════════════════════════════════════════════
-    "ssh.upload": tool({
+    defineTool({
+      name: "ssh.upload",
       description: "Upload a local file to the remote server via SCP/SFTP.",
-      args: {
-        session_id: tool.schema.string().describe("Session ID or alias"),
-        local_path: tool.schema.string().describe("Local file path"),
-        remote_path: tool.schema.string().describe("Remote destination path"),
-      },
-      async execute(args, ctx) {
-        const manager = sessionManager
-        const connection = manager.getSession(args.session_id)
+      shape: uploadShape,
+      permission: "ssh.upload",
+      async execute(args) {
+        const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
-          return `❌ Session \`${args.session_id}\` not found.`
+          return { content: `❌ Session \`${args.session_id}\` not found.` }
         }
 
         // Validate paths
         const pathCheck = sanitizePath(args.local_path)
-        if (!pathCheck.clean) return `❌ Invalid local path: ${pathCheck.reason}`
+        if (!pathCheck.clean) return { content: `❌ Invalid local path: ${pathCheck.reason}` }
 
         const remoteCheck = sanitizePath(args.remote_path)
-        if (!remoteCheck.clean) return `❌ Invalid remote path: ${remoteCheck.reason}`
-
-        await ctx.ask({
-          permission: "ssh.upload",
-          patterns: [args.local_path, args.remote_path],
-          always: [],
-          metadata: {
-            session_id: args.session_id,
-            local_path: args.local_path,
-            remote_path: args.remote_path,
-            host: connection.config.host,
-          },
-        })
+        if (!remoteCheck.clean) return { content: `❌ Invalid remote path: ${remoteCheck.reason}` }
 
         try {
           const sftp = await connection.sftp()
@@ -622,16 +711,18 @@ export function createSshTools(
             })
           })
 
-          return [
-            "## 📤 File Uploaded",
-            "",
-            `- **Local:** \`${args.local_path}\``,
-            `- **Remote:** \`${args.remote_path}\``,
-            `- **Session:** \`${args.session_id}\``,
-          ].join("\n")
+          return {
+            content: [
+              "## 📤 File Uploaded",
+              "",
+              `- **Local:** \`${args.local_path}\``,
+              `- **Remote:** \`${args.remote_path}\``,
+              `- **Session:** \`${args.session_id}\``,
+            ].join("\n"),
+          }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
-          return `❌ Upload failed: ${msg}`
+          return { content: `❌ Upload failed: ${msg}` }
         }
       },
     }),
@@ -639,37 +730,22 @@ export function createSshTools(
     // ═══════════════════════════════════════════════════════════════
     // ssh.download — Download file via SCP
     // ═══════════════════════════════════════════════════════════════
-    "ssh.download": tool({
+    defineTool({
+      name: "ssh.download",
       description: "Download a file from the remote server to local via SCP/SFTP.",
-      args: {
-        session_id: tool.schema.string().describe("Session ID or alias"),
-        remote_path: tool.schema.string().describe("Remote file path"),
-        local_path: tool.schema.string().describe("Local destination path"),
-      },
-      async execute(args, ctx) {
-        const manager = sessionManager
-        const connection = manager.getSession(args.session_id)
+      shape: downloadShape,
+      permission: "ssh.download",
+      async execute(args) {
+        const connection = sessionManager.getSession(args.session_id)
         if (!connection) {
-          return `❌ Session \`${args.session_id}\` not found.`
+          return { content: `❌ Session \`${args.session_id}\` not found.` }
         }
 
         const pathCheck = sanitizePath(args.local_path)
-        if (!pathCheck.clean) return `❌ Invalid local path: ${pathCheck.reason}`
+        if (!pathCheck.clean) return { content: `❌ Invalid local path: ${pathCheck.reason}` }
 
         const remoteCheck = sanitizePath(args.remote_path)
-        if (!remoteCheck.clean) return `❌ Invalid remote path: ${remoteCheck.reason}`
-
-        await ctx.ask({
-          permission: "ssh.download",
-          patterns: [args.remote_path, args.local_path],
-          always: [],
-          metadata: {
-            session_id: args.session_id,
-            remote_path: args.remote_path,
-            local_path: args.local_path,
-            host: connection.config.host,
-          },
-        })
+        if (!remoteCheck.clean) return { content: `❌ Invalid remote path: ${remoteCheck.reason}` }
 
         try {
           const sftp = await connection.sftp()
@@ -680,161 +756,140 @@ export function createSshTools(
             })
           })
 
-          return [
-            "## 📥 File Downloaded",
-            "",
-            `- **Remote:** \`${args.remote_path}\``,
-            `- **Local:** \`${args.local_path}\``,
-            `- **Session:** \`${args.session_id}\``,
-          ].join("\n")
+          return {
+            content: [
+              "## 📥 File Downloaded",
+              "",
+              `- **Remote:** \`${args.remote_path}\``,
+              `- **Local:** \`${args.local_path}\``,
+              `- **Session:** \`${args.session_id}\``,
+            ].join("\n"),
+          }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error)
-          return `❌ Download failed: ${msg}`
+          return { content: `❌ Download failed: ${msg}` }
         }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.check_command — Validate command safety (dry-run)
+    // ssh.check_command — Validate command safety (dry-run, read-only)
     // ═══════════════════════════════════════════════════════════════
-    "ssh.check_command": tool({
+    defineTool({
+      name: "ssh.check_command",
       description:
         "Check if a command is safe to execute without actually running it. " +
         "Returns the safety level, any matched blocklist rules, and suggestions. " +
         "Use this to preview command safety before execution.",
-      args: {
-        command: tool.schema.string().describe("Command to validate"),
-      },
-      async execute(args, ctx) {
-        const customAllowlist = getEffectiveCustomAllowlist(ctx.directory, extraAllowlist)
+      shape: checkCommandShape,
+      permission: "ssh.check_command",
+      async execute(args) {
+        const customAllowlist = getEffectiveCustomAllowlist(projectDir, extraAllowlist)
         const validation = validateCommand(args.command, mode, extraBlocklist, customAllowlist)
-        return formatCheckResult(args.command, validation)
+        return { content: formatCheckResult(args.command, validation) }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.security_policy — View/manage security policy
+    // ssh.security_policy — View the current security policy (read-only)
     // ═══════════════════════════════════════════════════════════════
-    "ssh.security_policy": tool({
+    defineTool({
+      name: "ssh.security_policy",
       description:
-        "View or modify the SSH security policy. " +
-        "Can add/remove patterns from the blocklist or allowlist, " +
-        "and view the current security mode.",
-      args: {
-        action: tool.schema
-          .enum(["view", "add_blocklist", "remove_blocklist", "add_allowlist", "remove_allowlist"])
-          .describe("Action to perform"),
-        pattern: tool.schema.string().optional().describe("Regex pattern to add/remove"),
+        "View the SSH security policy: the active security mode, the blocklist, and the allowlist. " +
+        "Read-only. Use ssh.security_policy_modify to change any pattern.",
+      shape: policyViewShape,
+      permission: "ssh.security_policy",
+      async execute() {
+        const policy = getPolicy(projectDir, mode)
+        return { content: formatSecurityPolicy(policy, extraAllowlist) }
       },
-      async execute(args, ctx) {
-        if (!args.pattern && args.action !== "view") {
-          return "❌ A pattern is required for add/remove actions."
-        }
+    }),
 
-        if (args.pattern) {
-          // Validate regex
-          try {
-            new RegExp(args.pattern)
-          } catch {
-            return `❌ Invalid regex pattern: \`${args.pattern}\``
-          }
-        }
-
-        const isMutation = args.action !== "view"
-
-        // Security policy MUTATIONS (add/remove allowlist or blocklist) always
-        // require explicit user confirmation via opencode's permission system.
-        // `always: []` guarantees every change is re-confirmed — the LLM can
-        // never self-grant an allowlist entry without the user clicking allow.
-        if (isMutation) {
-          await ctx.ask({
-            permission: "ssh.security_policy.modify",
-            patterns: [`${args.action}: ${args.pattern || ""}`],
-            always: [],
-            metadata: {
-              action: args.action,
-              pattern: args.pattern,
-              change_type: "security_policy_mutation",
-            },
-          })
-        } else {
-          // Viewing the policy is read-only and harmless — approved without
-          // a prompt (see the permission.ask hook in hooks.ts).
-          await ctx.ask({
-            permission: "ssh.security_policy.view",
-            patterns: ["view"],
-            always: ["view"],
-            metadata: {
-              action: "view",
-            },
-          })
+    // ═══════════════════════════════════════════════════════════════
+    // ssh.security_policy_modify — Add/remove blocklist or allowlist patterns
+    //
+    // Split from ssh.security_policy so the permission it needs is static:
+    // in SDK v2 a tool declares one action, and the permission hook maps
+    // `ssh.security_policy_modify` to "ask" unconditionally.
+    // ═══════════════════════════════════════════════════════════════
+    defineTool({
+      name: "ssh.security_policy_modify",
+      description:
+        "Add or remove a pattern from the SSH security blocklist or allowlist. " +
+        "Every change requires explicit user confirmation and is never self-granted. " +
+        "Use ssh.security_policy to inspect the current policy.",
+      shape: policyModifyShape,
+      permission: "ssh.security_policy_modify",
+      async execute(args) {
+        // Validate regex
+        try {
+          new RegExp(args.pattern)
+        } catch {
+          return { content: `❌ Invalid regex pattern: \`${args.pattern}\`` }
         }
 
         switch (args.action) {
-          case "view": {
-            const policy = getPolicy(ctx.directory, mode)
-            return formatSecurityPolicy(policy, extraAllowlist)
-          }
           case "add_blocklist": {
-            const policy = addBlocklistPattern(ctx.directory, args.pattern!)
-            return [
-              "## ✅ Blocklist Pattern Added",
-              "",
-              `Added: \`${args.pattern}\``,
-              "",
-              formatSecurityPolicy(policy),
-            ].join("\n")
+            const policy = addBlocklistPattern(projectDir, args.pattern)
+            return {
+              content: ["## ✅ Blocklist Pattern Added", "", `Added: \`${args.pattern}\``, "", formatSecurityPolicy(policy)].join(
+                "\n",
+              ),
+            }
           }
           case "remove_blocklist": {
-            const policy = removeBlocklistPattern(ctx.directory, args.pattern!)
-            return [
-              "## ✅ Blocklist Pattern Removed",
-              "",
-              `Removed: \`${args.pattern}\``,
-              "",
-              formatSecurityPolicy(policy),
-            ].join("\n")
+            const policy = removeBlocklistPattern(projectDir, args.pattern)
+            return {
+              content: [
+                "## ✅ Blocklist Pattern Removed",
+                "",
+                `Removed: \`${args.pattern}\``,
+                "",
+                formatSecurityPolicy(policy),
+              ].join("\n"),
+            }
           }
           case "add_allowlist": {
-            const policy = addAllowlistPattern(ctx.directory, args.pattern!)
-            return [
-              "## ✅ Allowlist Pattern Added",
-              "",
-              `Added: \`${args.pattern}\``,
-              "",
-              formatSecurityPolicy(policy),
-            ].join("\n")
+            const policy = addAllowlistPattern(projectDir, args.pattern)
+            return {
+              content: [
+                "## ✅ Allowlist Pattern Added",
+                "",
+                `Added: \`${args.pattern}\``,
+                "",
+                formatSecurityPolicy(policy),
+              ].join("\n"),
+            }
           }
           case "remove_allowlist": {
-            const policy = removeAllowlistPattern(ctx.directory, args.pattern!)
-            return [
-              "## ✅ Allowlist Pattern Removed",
-              "",
-              `Removed: \`${args.pattern}\``,
-              "",
-              formatSecurityPolicy(policy),
-            ].join("\n")
+            const policy = removeAllowlistPattern(projectDir, args.pattern)
+            return {
+              content: [
+                "## ✅ Allowlist Pattern Removed",
+                "",
+                `Removed: \`${args.pattern}\``,
+                "",
+                formatSecurityPolicy(policy),
+              ].join("\n"),
+            }
           }
-          default:
-            return `❌ Unknown action: ${args.action}`
         }
       },
     }),
 
     // ═══════════════════════════════════════════════════════════════
-    // ssh.audit_log — View command audit trail
+    // ssh.audit_log — View command audit trail (read-only)
     // ═══════════════════════════════════════════════════════════════
-    "ssh.audit_log": tool({
+    defineTool({
+      name: "ssh.audit_log",
       description:
         "View the SSH command audit log. Shows all executed, blocked, and approved commands " +
         "with timestamps, results, and details. Supports filtering by session and command.",
-      args: {
-        limit: tool.schema.number().optional().describe("Maximum entries to show (default: 20)"),
-        session_id: tool.schema.string().optional().describe("Filter by session ID"),
-        command_filter: tool.schema.string().optional().describe("Filter by command text"),
-      },
-      async execute(args, ctx) {
-        const entries = readAuditLog(ctx.directory, {
+      shape: auditLogShape,
+      permission: "ssh.audit_log",
+      async execute(args) {
+        const entries = readAuditLog(projectDir, {
           limit: args.limit || 20,
           sessionId: args.session_id,
           commandFilter: args.command_filter,
@@ -842,33 +897,35 @@ export function createSshTools(
 
         if (entries.length === 0) {
           // Show stats even if no entries match
-          const stats = getAuditStats(ctx.directory)
+          const stats = getAuditStats(projectDir)
           if (stats.total === 0) {
-            return "📋 No audit entries yet. Commands executed via ssh.exec will be logged here."
+            return { content: "📋 No audit entries yet. Commands executed via ssh.exec will be logged here." }
           }
 
-          return [
-            `## SSH Audit Stats`,
-            "",
-            `- **Total:** ${stats.total}`,
-            `- **Success:** ${stats.success}`,
-            `- **Blocked:** ${stats.blocked}`,
-            `- **Approved (risky):** ${stats.approved}`,
-            `- **Errors:** ${stats.error}`,
-            "",
-            "No entries match the current filters.",
-          ].join("\n")
+          return {
+            content: [
+              `## SSH Audit Stats`,
+              "",
+              `- **Total:** ${stats.total}`,
+              `- **Success:** ${stats.success}`,
+              `- **Blocked:** ${stats.blocked}`,
+              `- **Approved (risky):** ${stats.approved}`,
+              `- **Errors:** ${stats.error}`,
+              "",
+              "No entries match the current filters.",
+            ].join("\n"),
+          }
         }
 
         // Show stats header
-        const stats = getAuditStats(ctx.directory)
+        const stats = getAuditStats(projectDir)
         const header = [
           `### Stats: ${stats.total} total | ${stats.success} ✅ | ${stats.blocked} 🚫 | ${stats.approved} ⚠️ | ${stats.error} ❌`,
           "",
         ].join("\n")
 
-        return header + formatAuditLog(entries)
+        return { content: header + formatAuditLog(entries) }
       },
     }),
-  }
+  ]
 }

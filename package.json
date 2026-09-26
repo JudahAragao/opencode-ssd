@@ -1,6 +1,6 @@
 {
   "name": "@judaharagao/opencode-ssh",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking",
   "type": "module",
   "main": "dist/index.js",
@@ -8,10 +8,6 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    },
-    "./server": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
@@ -55,11 +51,12 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
-    "@types/ssh2": "^1.11.0",
+    "@opencode/plugin": "^2.0.18",
     "@types/bun": "latest",
+    "@types/ssh2": "^1.11.0",
     "typescript": "^5.5.0"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": "^1.18.0"
+    "@opencode/plugin": "^2.0.18"
   }
 }
