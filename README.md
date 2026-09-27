@@ -22,11 +22,25 @@ SSH access plugin for OpenCode — secure remote command execution with command 
 
 Requires **OpenCode v2** and `@opencode/plugin` `^2.0.18`.
 
-Add to your `opencode.json`:
+### Option 1: Via OpenCode CLI (recommended)
+
+```bash
+opencode plugin add @oktis-works/opencode-ssh
+```
+
+This installs the plugin automatically in your OpenCode.
+
+### Option 2: Via npm
+
+```bash
+npm install -g @oktis-works/opencode-ssh
+```
+
+Then add to your `opencode.json`:
 
 ```json
 {
-  "plugins": ["@judaharagao/opencode-ssh"]
+  "plugins": ["@oktis-works/opencode-ssh"]
 }
 ```
 
@@ -36,7 +50,7 @@ Or with configuration:
 {
   "plugins": [
     {
-      "package": "@judaharagao/opencode-ssh",
+      "package": "@oktis-works/opencode-ssh",
       "options": {
         "mode": "full",
         "max_sessions": 5,
@@ -112,7 +126,7 @@ Restricted and read-only modes respect allowlist patterns from **both** sources 
 1. **Plugin config** — in your `opencode.json`:
 
    ```json
-   ["@judaharagao/opencode-ssh", {
+   ["@oktis-works/opencode-ssh", {
      "mode": "restricted",
      "allowlist": ["docker stop .*", "docker rm .*"]
    }]
@@ -250,8 +264,8 @@ element of a tuple in the `plugin` array. v2 uses `Plugin.define({ setup })`
 and the `plugins` array with an object.
 
 ```diff
-- { "plugin": [["@judaharagao/opencode-ssh", { "mode": "full" }]] }
-+ { "plugins": [{ "package": "@judaharagao/opencode-ssh", "options": { "mode": "full" } }] }
+- { "plugin": [["@oktis-works/opencode-ssh", { "mode": "full" }]] }
++ { "plugins": [{ "package": "@oktis-works/opencode-ssh", "options": { "mode": "full" } }] }
 ```
 
 The `./server` export was removed, and the peer dependency is now
