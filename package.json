@@ -1,5 +1,5 @@
 {
-  "name": "@judaharagao/opencode-ssh",
+  "name": "@oktis-works/opencode-ssh",
   "version": "2.1.1",
   "description": "SSH access plugin for OpenCode - secure remote command execution with command blocking",
   "type": "module",
@@ -58,5 +58,9 @@
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.0.18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
